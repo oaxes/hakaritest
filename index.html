@@ -49,6 +49,7 @@
             cursor: pointer;
             font-size: 16px;
             margin: 5px;
+            transition: background-color 0.2s;
         }
         .button:hover {
             background-color: #1976D2;
@@ -92,6 +93,7 @@
             color: #f44336;
             font-size: 14px;
             margin-top: 10px;
+            min-height: 1.2em;
         }
         .info-message {
             color: #666;
@@ -137,11 +139,11 @@
         // グローバル変数
         let bluetoothDevice = null;
         let bluetoothServer = null;
-        let service = null;
         let readCharacteristic = null;
         let writeCharacteristic = null;
         let weight1 = null;
         let weight2 = null;
+        let activeAreaNumber = null; // どちらのボタンが押されたかを保持する変数
 
         // SDKの仕様に基づく設定値
         const SERVICE_UUID = '5699d362-0c53-11e7-93ae-92361f002671';
@@ -158,55 +160,68 @@
         if (!navigator.bluetooth) {
             document.getElementById('infoMessage').textContent = 'このブラウザはWeb Bluetooth APIに対応していません';
             document.getElementById('connectBtn').disabled = true;
+            document.getElementById('simulationBtn').disabled = true;
         }
 
         // 電子秤への接続
         async function connectToScale() {
             try {
-                updateInfoMessage('接続中...');
+                updateInfoMessage('デバイスを検索中...');
                 
-                // デバイスの検索・選択（A&D_HID_で始まるデバイスを検索）
                 bluetoothDevice = await navigator.bluetooth.requestDevice({
                     filters: [{ namePrefix: DEVICE_NAME_PREFIX }],
                     optionalServices: [SERVICE_UUID]
                 });
 
-                // GATTサーバーに接続
+                updateInfoMessage('デバイスに接続中...');
+                bluetoothDevice.addEventListener('gattserverdisconnected', onDisconnected);
+
                 bluetoothServer = await bluetoothDevice.gatt.connect();
-                
-                // サービスの取得
-                service = await bluetoothServer.getPrimaryService(SERVICE_UUID);
-                
-                // キャラクタリスティックの取得
+                const service = await bluetoothServer.getPrimaryService(SERVICE_UUID);
                 readCharacteristic = await service.getCharacteristic(READ_CHARACTERISTIC_UUID);
                 writeCharacteristic = await service.getCharacteristic(WRITE_CHARACTERISTIC_UUID);
                 
-                // 接続状態の更新
+                await readCharacteristic.startNotifications();
+                readCharacteristic.addEventListener('characteristicvaluechanged', handleNotifications);
+                
                 updateConnectionStatus(true);
                 updateInfoMessage('接続成功: ' + bluetoothDevice.name);
                 
             } catch (error) {
                 console.error('接続エラー:', error);
-                updateInfoMessage('接続エラー: ' + error.message);
+                // ユーザーがダイアログをキャンセルした場合のエラーは無視する
+                if (error.name !== 'NotFoundError') {
+                    updateInfoMessage('接続エラー: ' + error.message);
+                } else {
+                    updateInfoMessage('デバイスの選択がキャンセルされました。');
+                }
                 updateConnectionStatus(false);
             }
+        }
+
+        // 切断イベントのハンドラ
+        function onDisconnected() {
+            updateInfoMessage('デバイスとの接続が切れました。');
+            updateConnectionStatus(false);
+            if (readCharacteristic) {
+                readCharacteristic.removeEventListener('characteristicvaluechanged', handleNotifications);
+            }
+            bluetoothDevice = null;
+            readCharacteristic = null;
+            writeCharacteristic = null;
         }
 
         // 電子秤からの切断
         async function disconnectFromScale() {
             try {
-                if (bluetoothDevice && bluetoothDevice.gatt.connected) {
-                    await bluetoothDevice.gatt.disconnect();
+                if (!bluetoothDevice || !bluetoothDevice.gatt.connected) return;
+
+                if (readCharacteristic) {
+                    await readCharacteristic.stopNotifications();
+                    readCharacteristic.removeEventListener('characteristicvaluechanged', handleNotifications);
                 }
-                
-                bluetoothDevice = null;
-                bluetoothServer = null;
-                service = null;
-                readCharacteristic = null;
-                writeCharacteristic = null;
-                
-                updateConnectionStatus(false);
-                updateInfoMessage('切断しました');
+                await bluetoothDevice.gatt.disconnect();
+                // onDisconnectedイベントで後続処理が行われる
                 
             } catch (error) {
                 console.error('切断エラー:', error);
@@ -214,29 +229,60 @@
             }
         }
 
-        // 重量取得
+        // Notification受信時の処理
+        function handleNotifications(event) {
+            try {
+                const value = event.target.value;
+                const weight = parseWeightData(value);
+
+                if (activeAreaNumber === null) {
+                    console.warn('重量データを受信しましたが、取得先が指定されていません。');
+                    return;
+                }
+
+                if (activeAreaNumber === 1) {
+                    weight1 = weight;
+                    document.getElementById('weightDisplay1').textContent = weight.toFixed(2) + ' g';
+                } else {
+                    weight2 = weight;
+                    document.getElementById('weightDisplay2').textContent = weight.toFixed(2) + ' g';
+                }
+                activeAreaNumber = null; // 処理が終わったらリセット
+
+            } catch(error) {
+                console.error('データ受信・解析エラー:', error);
+                if (activeAreaNumber !== null) {
+                    showErrorMessage(activeAreaNumber, error.message);
+                    activeAreaNumber = null;
+                }
+            }
+        }
+
+        // 重量取得コマンド送信
         async function getWeight(areaNumber) {
             try {
                 clearErrorMessage(areaNumber);
+                activeAreaNumber = areaNumber; // どのボタンが押されたかを記録
                 
                 // シミュレーションモードの処理
                 if (simulationMode) {
-                    // シミュレーション用の重量データ
                     const weight = areaNumber === 1 ? SIMULATION_WEIGHT_1 : SIMULATION_WEIGHT_2;
-                    
-                    // 取得した重量を保持・表示
-                    if (areaNumber === 1) {
-                        weight1 = weight;
-                        document.getElementById('weightDisplay1').textContent = weight.toFixed(2) + ' g';
-                    } else {
-                        weight2 = weight;
-                        document.getElementById('weightDisplay2').textContent = weight.toFixed(2) + ' g';
-                    }
+                    setTimeout(() => { // 非同期処理を模倣
+                        if (activeAreaNumber === areaNumber) {
+                            if (areaNumber === 1) {
+                                weight1 = weight;
+                                document.getElementById('weightDisplay1').textContent = weight.toFixed(2) + ' g';
+                            } else {
+                                weight2 = weight;
+                                document.getElementById('weightDisplay2').textContent = weight.toFixed(2) + ' g';
+                            }
+                            activeAreaNumber = null;
+                        }
+                    }, 100);
                     return;
                 }
                 
-                // 実デバイス接続の確認
-                if (!readCharacteristic || !writeCharacteristic) {
+                if (!writeCharacteristic) {
                     throw new Error('電子秤に接続されていません');
                 }
                 
@@ -244,78 +290,45 @@
                 const command = new TextEncoder().encode('Q\r\n');
                 await writeCharacteristic.writeValue(command);
                 
-                // 短い待機時間を設ける
-                await new Promise(resolve => setTimeout(resolve, 100));
-                
-                // 応答データの読み取り
-                const value = await readCharacteristic.readValue();
-                
-                // データフォーマットの解析
-                const weight = parseWeightData(value);
-                
-                // 取得した重量を保持・表示
-                if (areaNumber === 1) {
-                    weight1 = weight;
-                    document.getElementById('weightDisplay1').textContent = weight.toFixed(2) + ' g';
-                } else {
-                    weight2 = weight;
-                    document.getElementById('weightDisplay2').textContent = weight.toFixed(2) + ' g';
-                }
-                
             } catch (error) {
-                console.error('重量取得エラー:', error);
-                showErrorMessage(areaNumber, '重量取得エラー: ' + error.message);
+                console.error('重量取得コマンド送信エラー:', error);
+                showErrorMessage(areaNumber, '取得コマンド送信エラー');
+                activeAreaNumber = null; // エラー時もリセット
             }
         }
 
-        // 重量データの解析（SDKの仕様に基づく実装）
+        // 重量データの解析
         function parseWeightData(dataView) {
             try {
-                // DataViewからUint8Arrayに変換
                 const uint8Array = new Uint8Array(dataView.buffer);
-                
-                // 受信データを文字列に変換
                 const responseStr = new TextDecoder().decode(uint8Array);
                 console.log('受信データ:', responseStr);
                 
-                // データフォーマットの解析
-                // ヘッダ2Byte + セパレータ1Byte + 重量データ9Byte + 単位3Byte + ターミネータ2Byte
-                
-                // ヘッダの確認
                 const header = responseStr.substring(0, 2);
                 
-                if (header === 'ST') {
-                    // 計量モードの取得データ
+                if (header === 'ST' || header === 'QT') { // 安定、不安定問わず処理
                     const separator = responseStr.substring(2, 3);
                     if (separator !== ',') {
                         throw new Error('セパレータが不正です');
                     }
                     
-                    // 重量データの抽出（9桁）
                     const weightData = responseStr.substring(3, 12);
                     const sign = weightData.substring(0, 1);
                     const numberPart = weightData.substring(1, 9);
                     
-                    // 数値に変換
                     let weight = parseFloat(numberPart);
                     if (sign === '-') {
                         weight = -weight;
                     }
                     
-                    // 単位の確認
-                    const unit = responseStr.substring(12, 15);
-                    console.log('単位:', unit);
-                    
                     return weight;
                     
-                } else if (header === 'QT') {
-                    throw new Error('個数モードのデータです（計量モードに切り替えてください）');
                 } else if (header === 'US') {
-                    throw new Error('データが安定していません');
-                } else if (header === 'QL') {
+                    throw new Error('データが不安定です');
+                } else if (header === 'OL') { // SDKドキュメントによるとQLではなくOLの場合がある
                     throw new Error('データが計量範囲を超えています');
                 } else {
-                    throw new Error('未知のヘッダです: ' + header);
+                    throw new Error('未知の応答データです: ' + responseStr.trim());
                 }
                 
             } catch (error) {
@@ -329,25 +342,22 @@
             simulationMode = !simulationMode;
             const simulationBtn = document.getElementById('simulationBtn');
             const connectBtn = document.getElementById('connectBtn');
-            const disconnectBtn = document.getElementById('disconnectBtn');
             
             if (simulationMode) {
+                if (bluetoothDevice && bluetoothDevice.gatt.connected) {
+                    disconnectFromScale();
+                }
                 simulationBtn.textContent = 'シミュレーション中';
                 simulationBtn.style.backgroundColor = '#4CAF50';
                 updateConnectionStatus(true);
                 updateInfoMessage('シミュレーションモードが有効です');
                 connectBtn.disabled = true;
-                disconnectBtn.disabled = true;
             } else {
                 simulationBtn.textContent = 'シミュレーション';
                 simulationBtn.style.backgroundColor = '#FF9800';
                 updateConnectionStatus(false);
                 updateInfoMessage('シミュレーションモードが無効です');
                 connectBtn.disabled = false;
-                disconnectBtn.disabled = false;
-                
-                // シミュレーションモード解除時に測定値をクリア
-                clearWeightDisplays();
             }
         }
 
@@ -357,6 +367,8 @@
             weight2 = null;
             document.getElementById('weightDisplay1').textContent = '--.-- g';
             document.getElementById('weightDisplay2').textContent = '--.-- g';
+            clearErrorMessage(1);
+            clearErrorMessage(2);
         }
 
         // 接続状態の更新
@@ -371,15 +383,16 @@
                 const statusText = simulationMode ? 'シミュレーション接続' : '接続済み';
                 statusElement.innerHTML = `状態: <span class="connected">${statusText}</span>`;
                 connectBtn.disabled = true;
-                disconnectBtn.disabled = simulationMode ? true : false;
+                disconnectBtn.disabled = simulationMode;
                 getWeight1Btn.disabled = false;
                 getWeight2Btn.disabled = false;
             } else {
                 statusElement.innerHTML = '状態: <span class="disconnected">未接続</span>';
-                connectBtn.disabled = simulationMode ? true : false;
+                connectBtn.disabled = simulationMode;
                 disconnectBtn.disabled = true;
                 getWeight1Btn.disabled = true;
                 getWeight2Btn.disabled = true;
+                clearWeightDisplays();
             }
         }
 
@@ -398,9 +411,8 @@
             document.getElementById('errorMessage' + areaNumber).textContent = '';
         }
 
-        // 切断イベントの処理
+        // ページロード時の初期化
         document.addEventListener('DOMContentLoaded', function() {
-            // ページロード時の初期化
             updateConnectionStatus(false);
         });
     </script>
