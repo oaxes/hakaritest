@@ -345,7 +345,18 @@
                 updateInfoMessage('シミュレーションモードが無効です');
                 connectBtn.disabled = false;
                 disconnectBtn.disabled = false;
+                
+                // シミュレーションモード解除時に測定値をクリア
+                clearWeightDisplays();
             }
+        }
+
+        // 測定値表示のクリア
+        function clearWeightDisplays() {
+            weight1 = null;
+            weight2 = null;
+            document.getElementById('weightDisplay1').textContent = '--.-- g';
+            document.getElementById('weightDisplay2').textContent = '--.-- g';
         }
 
         // 接続状態の更新
