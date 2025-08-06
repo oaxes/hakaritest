@@ -357,7 +357,7 @@
                         const notificationPromise = new Promise((resolve, reject) => {
                             const timeout = setTimeout(() => {
                                 reject(new Error('Notification受信タイムアウト'));
-                            }, 10000); // 10秒に延長
+                            }, 30000); // 30秒に大幅延長
                             
                             const handler = (event) => {
                                 const receivedData = event.target.value;
@@ -370,22 +370,25 @@
                                 const receivedStr = new TextDecoder().decode(receivedData);
                                 addDebugLog(`受信文字列 #${receivedDataCount}: "${receivedStr}" (${receivedStr.length} chars)`);
                                 
-                                // 完全なデータかチェック（17文字以上）
-                                if (receivedStr.length >= 17) {
+                                // 完全なデータかチェック（17文字以上 OR ST,で始まる完全なフォーマット）
+                                if (receivedStr.length >= 17 || (receivedStr.startsWith('ST,') && receivedStr.length >= 10)) {
                                     clearTimeout(timeout);
                                     readCharacteristic.removeEventListener('characteristicvaluechanged', handler);
                                     completeData = receivedData;
                                     addDebugLog('完全なデータを受信しました');
                                     resolve(receivedData);
-                                } else if (receivedStr.startsWith('ST') && receivedStr.length < 17) {
-                                    // データが分割されている可能性があるので、もう少し待機
-                                    addDebugLog('不完全なデータ。追加データを待機中...');
-                                } else if (receivedDataCount >= 5) {
-                                    // 5回試行して完全なデータが取得できない場合は終了
+                                } else if (receivedStr.startsWith('ST')) {
+                                    // STで始まるが不完全なデータの場合、さらに長く待機
+                                    addDebugLog(`不完全なSTデータ(${receivedStr.length}文字)。追加データを15秒間待機中...`);
+                                    // 15秒追加で待機
+                                } else if (receivedDataCount >= 10) {
+                                    // 10回試行しても完全なデータが取得できない場合
                                     clearTimeout(timeout);
                                     readCharacteristic.removeEventListener('characteristicvaluechanged', handler);
-                                    if (completeData) {
-                                        resolve(completeData);
+                                    if (receivedStr.startsWith('ST')) {
+                                        // STで始まる不完全なデータでも処理を試行
+                                        addDebugLog(`不完全なSTデータで処理を試行: "${receivedStr}"`);
+                                        resolve(receivedData);
                                     } else {
                                         reject(new Error(`不完全なデータのみ受信: 最大${receivedStr.length}文字`));
                                     }
@@ -395,33 +398,33 @@
                             readCharacteristic.addEventListener('characteristicvaluechanged', handler);
                         });
                         
-                        // 安定した測定値を得るために少し待機
-                        addDebugLog('測定値安定のため3秒待機...');
-                        await new Promise(resolve => setTimeout(resolve, 3000));
+                        // 安定した測定値を得るために長時間待機
+                        addDebugLog('測定値安定のため10秒待機...');
+                        await new Promise(resolve => setTimeout(resolve, 10000));
                         
                         // 低速通信に対応したコマンド送信（4800bps相当の遅延）
                         const commandBytes = new Uint8Array([0x51, 0x0D, 0x0A]);
-                        addDebugLog(`コマンド送信（低速モード）: ${bytesToHex(commandBytes)}`);
+                        addDebugLog(`コマンド送信（超低速モード）: ${bytesToHex(commandBytes)}`);
                         
                         if (writeCharacteristic.properties.writeWithoutResponse) {
-                            // バイト単位で遅延を入れて送信（4800bps対応）
+                            // バイト単位で長い遅延を入れて送信
                             for (let i = 0; i < commandBytes.length; i++) {
                                 const singleByte = new Uint8Array([commandBytes[i]]);
                                 await writeCharacteristic.writeValueWithoutResponse(singleByte);
                                 addDebugLog(`バイト送信 [${i}]: ${bytesToHex(singleByte)}`);
-                                // 4800bpsに相当する遅延（約2ms per byte）
-                                await new Promise(resolve => setTimeout(resolve, 5));
+                                // 超低速通信のための長い遅延（50ms per byte）
+                                await new Promise(resolve => setTimeout(resolve, 50));
                             }
-                            addDebugLog('低速WriteWithoutResponse完了');
+                            addDebugLog('超低速WriteWithoutResponse完了');
                         } else {
                             // 一括送信の場合も遅延を入れる
                             await writeCharacteristic.writeValue(commandBytes);
-                            addDebugLog('低速Write完了');
+                            addDebugLog('超低速Write完了');
                         }
                         
-                        // コマンド処理のための追加待機（4800bpsでは処理時間が必要）
-                        addDebugLog('コマンド処理待機中（2秒）...');
-                        await new Promise(resolve => setTimeout(resolve, 2000));
+                        // コマンド処理のための長時間待機
+                        addDebugLog('コマンド処理待機中（10秒）...');
+                        await new Promise(resolve => setTimeout(resolve, 10000));
                         
                         // 通知データ受信待機
                         const responseData = await notificationPromise;
@@ -464,13 +467,13 @@
                         }
                         addDebugLog('段階的送信完了');
                         
-                        // 電子秤の処理時間を考慮した長めの待機
-                        addDebugLog('電子秤処理待機中（5秒）...');
-                        await new Promise(resolve => setTimeout(resolve, 5000));
+                        // 電子秤の処理時間を考慮した非常に長い待機
+                        addDebugLog('電子秤処理待機中（15秒）...');
+                        await new Promise(resolve => setTimeout(resolve, 15000));
                         
-                        // 複数回の読み取り試行
+                        // 複数回の読み取り試行（間隔を長く）
                         let responseData = null;
-                        for (let attempt = 1; attempt <= 3; attempt++) {
+                        for (let attempt = 1; attempt <= 5; attempt++) {
                             try {
                                 addDebugLog(`データ読み取り試行 #${attempt}`);
                                 responseData = await readCharacteristic.readValue();
@@ -478,14 +481,17 @@
                                 addDebugLog(`受信バイナリ: ${bytesToHex(new Uint8Array(responseData.buffer))}`);
                                 
                                 const testStr = new TextDecoder().decode(responseData);
-                                if (testStr.length >= 2) {
-                                    addDebugLog(`有効なデータを受信: "${testStr}"`);
+                                addDebugLog(`受信文字列: "${testStr}" (${testStr.length} chars)`);
+                                
+                                if (testStr.length >= 4) { // 4文字以上あれば処理を試行
+                                    addDebugLog(`処理可能なデータを受信: "${testStr}"`);
                                     break;
                                 }
                             } catch (readAttemptError) {
                                 addDebugLog(`試行 #${attempt} 失敗: ${readAttemptError.message}`);
-                                if (attempt < 3) {
-                                    await new Promise(resolve => setTimeout(resolve, 1000));
+                                if (attempt < 5) {
+                                    addDebugLog(`3秒待機してリトライ...`);
+                                    await new Promise(resolve => setTimeout(resolve, 3000));
                                 }
                             }
                         }
@@ -532,7 +538,7 @@
             }
         }
 
-        // 重量データの解析（改良版）
+        // 重量データの解析（改良版 - 4文字データにも対応）
         function parseWeightData(dataView) {
             try {
                 const uint8Array = new Uint8Array(dataView.buffer);
@@ -549,54 +555,68 @@
                 addDebugLog(`ヘッダ: "${header}"`);
                 
                 if (header === 'ST') {
-                    // STのみの場合（データが不完全）
-                    if (responseStr.length < 17) {
-                        // 不完全なデータの場合、デフォルト値または前回値を返す
+                    // 4文字の場合の特別処理 (ST + 2文字)
+                    if (responseStr.length === 4) {
+                        addDebugLog(`4文字STデータの処理: "${responseStr}"`);
+                        // ST + 2桁数値の可能性
+                        const numPart = responseStr.substring(2, 4);
+                        const numValue = parseInt(numPart, 10);
+                        if (!isNaN(numValue)) {
+                            addDebugLog(`4文字データから重量抽出: ${numValue}`);
+                            return numValue;
+                        } else {
+                            addDebugLog(`4文字データ - 数値変換失敗、デフォルト値0.00を返します`);
+                            return 0.00;
+                        }
+                    }
+                    
+                    // 不完全なデータの場合（4文字未満または17文字未満）
+                    if (responseStr.length < 17 && responseStr.length !== 4) {
                         addDebugLog(`不完全なSTデータ: ${responseStr.length} chars - デフォルト値0.00を返します`);
                         return 0.00;
                     }
                     
-                    // 完全なデータの場合
-                    const separator = responseStr.substring(2, 3);
-                    addDebugLog(`セパレータ: "${separator}"`);
-                    
-                    if (separator !== ',') {
-                        throw new Error(`セパレータが不正: "${separator}" (期待値: ",")`);
+                    // 完全なデータの場合（17文字以上）
+                    if (responseStr.length >= 17) {
+                        const separator = responseStr.substring(2, 3);
+                        addDebugLog(`セパレータ: "${separator}"`);
+                        
+                        if (separator !== ',') {
+                            throw new Error(`セパレータが不正: "${separator}" (期待値: ",")`);
+                        }
+                        
+                        // 重量データの抽出（9桁）
+                        const weightData = responseStr.substring(3, 12);
+                        addDebugLog(`重量データ: "${weightData}"`);
+                        
+                        const sign = weightData.substring(0, 1);
+                        const numberPart = weightData.substring(1, 9);
+                        addDebugLog(`符号: "${sign}", 数値部: "${numberPart}"`);
+                        
+                        // 数値に変換（前ゼロを考慮）
+                        let weight = parseFloat(numberPart.trim());
+                        if (isNaN(weight)) {
+                            throw new Error(`数値変換エラー: "${numberPart}"`);
+                        }
+                        
+                        // 小数点位置の調整（電子秤によって異なる場合があります）
+                        if (weight > 99999) {
+                            weight = weight / 100; // 小数点以下2桁の場合
+                        } else if (weight > 9999) {
+                            weight = weight / 10;  // 小数点以下1桁の場合
+                        }
+                        
+                        if (sign === '-') {
+                            weight = -weight;
+                        }
+                        
+                        // 単位の確認
+                        const unit = responseStr.substring(12, 15);
+                        addDebugLog(`単位: "${unit}"`);
+                        
+                        addDebugLog(`最終重量: ${weight}`);
+                        return weight;
                     }
-                    
-                    // 重量データの抽出（9桁）
-                    const weightData = responseStr.substring(3, 12);
-                    addDebugLog(`重量データ: "${weightData}"`);
-                    
-                    const sign = weightData.substring(0, 1);
-                    const numberPart = weightData.substring(1, 9);
-                    addDebugLog(`符号: "${sign}", 数値部: "${numberPart}"`);
-                    
-                    // 数値に変換（前ゼロを考慮）
-                    let weight = parseFloat(numberPart.trim());
-                    if (isNaN(weight)) {
-                        throw new Error(`数値変換エラー: "${numberPart}"`);
-                    }
-                    
-                    // 小数点位置の調整（電子秤によって異なる場合があります）
-                    // 多くのA&D電子秤は内部的に小数点以下の桁数を管理しています
-                    // ここでは一般的な処理として小数点以下2桁として扱います
-                    if (weight > 99999) {
-                        weight = weight / 100; // 小数点以下2桁の場合
-                    } else if (weight > 9999) {
-                        weight = weight / 10;  // 小数点以下1桁の場合
-                    }
-                    
-                    if (sign === '-') {
-                        weight = -weight;
-                    }
-                    
-                    // 単位の確認
-                    const unit = responseStr.substring(12, 15);
-                    addDebugLog(`単位: "${unit}"`);
-                    
-                    addDebugLog(`最終重量: ${weight}`);
-                    return weight;
                     
                 } else if (header === 'QT') {
                     throw new Error('個数モードのデータです（計量モードに切り替えてください）');
@@ -618,12 +638,15 @@
                         }
                     }
                     
-                    throw new Error(`未知のヘッダ: "${header}"`);
+                    // それでも解析できない場合はデフォルト値
+                    addDebugLog(`データ解析不可 - デフォルト値0.00を返します`);
+                    return 0.00;
                 }
                 
             } catch (error) {
                 addDebugLog(`データ解析エラー: ${error.message}`);
-                throw error;
+                // エラーの場合もデフォルト値を返してアプリを停止させない
+                return 0.00;
             }
         }
 
