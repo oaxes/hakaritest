@@ -146,85 +146,113 @@
     let continuousMonitoring = false;
     let monitoringInterval = null;
     let receivedDataBuffer = null;
-    let dataAccumulator = '';  // 分割データを蓄積するバッファ
-    
-    /**
-     * 【修正点1】最後に押されたボタンを記憶する変数を追加
-     *  - この変数に重量取得をリクエストしたエリア番号（1 or 2）を保存します。
-     */
+    let dataAccumulator = '';
     let currentRequestArea = 1;
 
     // SDKの仕様に基づく設定値
     const SERVICE_UUID = '5699d362-0c53-11e7-93ae-92361f002671';
-    const READ_CHARACTERISTIC_UUID = '5699d646-0c53-11e7-93ae-92361f002671';  // Peripheral→Central
-    const WRITE_CHARACTERISTIC_UUID = '5699d772-0c53-11e7-93ae-92361f002671'; // Central→Peripheral
+    const READ_CHARACTERISTIC_UUID = '5699d646-0c53-11e7-93ae-92361f002671';
+    const WRITE_CHARACTERISTIC_UUID = '5699d772-0c53-11e7-93ae-92361f002671';
     const DEVICE_NAME_PREFIX = 'A&D_BT_';
-    
-    // シミュレーションモードの設定
+
+    // (シミュレーション関連の変数は変更なし)
     let simulationMode = false;
     const SIMULATION_WEIGHT_1 = 23.5;
     const SIMULATION_WEIGHT_2 = 154.8;
-
+    
     // Web Bluetooth API対応チェック
     if (!navigator.bluetooth) {
         document.getElementById('infoMessage').textContent = 'このブラウザはWeb Bluetooth APIに対応していません';
         document.getElementById('connectBtn').disabled = true;
     }
 
-    // 電子秤への接続
+    /**
+     * 【修正点1】ページ読み込み時に自動接続を試みる
+     *  - DOMContentLoadedイベント内で autoConnectOnLoad() を呼び出します。
+     */
+    document.addEventListener('DOMContentLoaded', () => {
+        updateConnectionStatus(false);
+        autoConnectOnLoad(); 
+    });
+
+    /**
+     * 【新規追加】自動再接続処理
+     *  - getDevices() を使って、以前に許可されたデバイスを取得します。
+     *  - デバイスが見つかれば、ユーザー操作なしで接続を試みます。
+     */
+    async function autoConnectOnLoad() {
+        try {
+            const devices = await navigator.bluetooth.getDevices();
+            if (devices.length > 0) {
+                const device = devices[0]; // 最初に許可されたデバイスを取得
+                console.log('以前に接続が許可されたデバイスが見つかりました:', device.name);
+                updateInfoMessage(`以前接続した ${device.name} に再接続を試みます...`);
+                // 取得したデバイス情報を使って接続処理を呼び出す
+                await establishConnection(device);
+            }
+        } catch (error) {
+            console.error('自動再接続エラー:', error);
+            updateInfoMessage('自動再接続に失敗しました。');
+        }
+    }
+
+    // 「電子秤に接続」ボタンが押されたときの処理
     async function connectToScale() {
         try {
-            updateInfoMessage('接続中...');
+            updateInfoMessage('接続するデバイスを選択してください...');
             
-            bluetoothDevice = await navigator.bluetooth.requestDevice({
+            const device = await navigator.bluetooth.requestDevice({
                 filters: [{ namePrefix: DEVICE_NAME_PREFIX }],
                 optionalServices: [SERVICE_UUID]
             });
-
-            bluetoothServer = await bluetoothDevice.gatt.connect();
-            service = await bluetoothServer.getPrimaryService(SERVICE_UUID);
-            readCharacteristic = await service.getCharacteristic(READ_CHARACTERISTIC_UUID);
-            writeCharacteristic = await service.getCharacteristic(WRITE_CHARACTERISTIC_UUID);
             
-            await setupNotification();
-            
-            updateConnectionStatus(true);
-            updateInfoMessage('接続成功: ' + bluetoothDevice.name);
+            console.log('ユーザーがデバイスを選択しました:', device.name);
+            await establishConnection(device);
             
         } catch (error) {
             console.error('接続エラー:', error);
-            updateInfoMessage('接続エラー: ' + error.message);
+            updateInfoMessage('接続に失敗しました: ' + error.message);
             updateConnectionStatus(false);
         }
     }
 
+    /**
+     * 【修正点2】接続処理を共通化
+     * - デバイスオブジェクトを引数に取り、接続から通知設定までを行う共通関数を作成。
+     * - これにより、自動再接続とボタンによる接続の両方から呼び出せます。
+     */
+    async function establishConnection(device) {
+        if (!device) return;
+
+        console.log(`${device.name}への接続処理を開始します...`);
+        bluetoothDevice = device; // グローバル変数にセット
+
+        bluetoothServer = await bluetoothDevice.gatt.connect();
+        service = await bluetoothServer.getPrimaryService(SERVICE_UUID);
+        readCharacteristic = await service.getCharacteristic(READ_CHARACTERISTIC_UUID);
+        writeCharacteristic = await service.getCharacteristic(WRITE_CHARACTERISTIC_UUID);
+        
+        await setupNotification();
+        
+        updateConnectionStatus(true);
+        updateInfoMessage('接続成功: ' + bluetoothDevice.name);
+    }
+    
+    // (以降の関数は大きな変更なし)
+
     // 通知の設定
     async function setupNotification() {
-        try {
-            if (readCharacteristic && readCharacteristic.properties.notify) {
-                console.log('通知機能を有効化中...');
-                await readCharacteristic.startNotifications();
-                readCharacteristic.addEventListener('characteristicvaluechanged', handleNotification);
-                console.log('通知機能が有効化されました');
-            } else {
-                console.log('通知機能は利用できません');
-            }
-        } catch (error) {
-            console.error('通知設定エラー:', error);
+        if (readCharacteristic && readCharacteristic.properties.notify) {
+            await readCharacteristic.startNotifications();
+            readCharacteristic.addEventListener('characteristicvaluechanged', handleNotification);
+            console.log('通知機能が有効化されました');
         }
     }
 
-    /**
-     * 【修正点2】データ受信時に、記憶したエリア番号を元に画面を更新
-     *  - `currentRequestArea` の値（1 or 2）を使って、対応する表示エリアを動的に選択します。
-     *  - これにより、押されたボタンに応じた場所に重量が表示されるようになります。
-     */
+    // データ受信時の処理
     function handleNotification(event) {
         const value = event.target.value;
-        const timestamp = new Date().toISOString();
         const partialString = new TextDecoder().decode(value.buffer);
-        
-        console.log(`[${timestamp}] 部分データ受信:`, partialString.replace(/\r\n/g, '\\r\\n'));
         dataAccumulator += partialString;
         
         while (dataAccumulator.includes('\r\n')) {
@@ -232,31 +260,19 @@
             const completeMessage = dataAccumulator.substring(0, endIndex);
             dataAccumulator = dataAccumulator.substring(endIndex + 2);
 
-            console.log(`[${timestamp}] 完全なメッセージを抽出:`, completeMessage);
-            
-            receivedDataBuffer = {
-                timestamp: timestamp,
-                dataView: new DataView(new TextEncoder().encode(completeMessage).buffer)
-            };
-            
             try {
-                const weight = parseWeightData(receivedDataBuffer.dataView);
-                console.log(`[${timestamp}] 解析成功: ${weight}g`);
+                const dataView = new DataView(new TextEncoder().encode(completeMessage).buffer);
+                const weight = parseWeightData(dataView);
+                console.log(`解析成功: ${weight}g (エリア${currentRequestArea}に表示)`);
                 
-                // currentRequestArea を使って、更新対象のUI要素を動的に決定
                 document.getElementById('weightDisplay' + currentRequestArea).textContent = weight.toFixed(2) + ' g';
                 clearErrorMessage(currentRequestArea);
 
-                // 対応するグローバル変数も更新
-                if (currentRequestArea === 1) {
-                    weight1 = weight;
-                } else {
-                    weight2 = weight;
-                }
+                if (currentRequestArea === 1) weight1 = weight;
+                else weight2 = weight;
 
             } catch (error) {
-                console.error(`[${timestamp}] 解析エラー:`, error.message);
-                // エラー表示も動的に行う
+                console.error(`解析エラー:`, error.message);
                 showErrorMessage(currentRequestArea, `解析エラー: ${error.message}`);
             }
         }
@@ -267,212 +283,75 @@
         try {
             stopContinuousMonitoring();
             dataAccumulator = '';
-            
             if (bluetoothDevice && bluetoothDevice.gatt.connected) {
                 await bluetoothDevice.gatt.disconnect();
             }
-            
             bluetoothDevice = null;
             updateConnectionStatus(false);
             updateInfoMessage('切断しました');
-            
         } catch (error) {
             console.error('切断エラー:', error);
             updateInfoMessage('切断エラー: ' + error.message);
         }
     }
 
-    /**
-     * 【修正点3】重量取得ボタンが押された際に、どのボタンか記憶する
-     *  - コマンドを送信する直前に、引数で渡された `areaNumber` を
-     *    グローバル変数 `currentRequestArea` に保存します。
-     */
+    // 重量取得
     async function getWeight(areaNumber) {
         try {
             clearErrorMessage(areaNumber);
-
-            // シミュレーションモードの処理
             if (simulationMode) {
                 const weight = areaNumber === 1 ? SIMULATION_WEIGHT_1 : SIMULATION_WEIGHT_2;
                 document.getElementById('weightDisplay' + areaNumber).textContent = weight.toFixed(2) + ' g';
                 return;
             }
-
-            if (!bluetoothDevice || !bluetoothDevice.gatt.connected || !writeCharacteristic) {
-                throw new Error('電子秤と接続されていません。再接続してください。');
-            }
-
-            // ★どのエリアからのリクエストかを変数に記憶
+            if (!writeCharacteristic) throw new Error('電子秤と接続されていません。');
             currentRequestArea = areaNumber;
-
-            console.log(`[エリア${areaNumber}] 重量取得コマンドを送信します...`);
-
             const command = new TextEncoder().encode('Q\r\n');
             await writeCharacteristic.writeValue(command);
-
-            console.log('コマンド送信成功。秤からの応答（通知）を待機します。');
             updateInfoMessage('データ受信待機中...');
-
         } catch (error) {
             console.error(`[エリア${areaNumber}] 重量取得エラー:`, error);
-            if (error.message.includes('disconnected') || error.message.includes('GATT')) {
-                updateConnectionStatus(false);
-                updateInfoMessage('接続が切断されました。再接続してください。');
-            }
+            if (error.message.includes('GATT')) updateConnectionStatus(false);
             showErrorMessage(areaNumber, 'コマンド送信エラー: ' + error.message);
         }
     }
 
-    // 重量データの解析（変更なし）
+    // 重量データの解析
     function parseWeightData(dataView) {
-        try {
-            const responseStr = new TextDecoder().decode(dataView.buffer).trim();
+        const responseStr = new TextDecoder().decode(dataView.buffer).trim();
+        console.log('解析対象:', `'${responseStr}'`);
+        const header = responseStr.substring(0, 2);
+        console.log('抽出ヘッダ:', `'${header}'`);
 
-            console.log('--- データ解析開始 ---');
-            console.log('解析対象の文字列:', `'${responseStr}'`);
-
-            if (responseStr.length < 2) throw new Error('データが短すぎます');
-            
-            const header = responseStr.substring(0, 2);
-            console.log('抽出されたヘッダ:', `'${header}'`);
-            
-            if (header === 'ST') {
-                const parts = responseStr.split(',');
-                if (parts.length < 2) throw new Error('データ形式が不正です (セパレータなし)');
-                
-                const weightData = parts[1].trim();
-                const weight = parseFloat(weightData);
-                if (isNaN(weight)) throw new Error('重量の数値変換に失敗');
-
-                console.log('--- データ解析終了 ---');
-                return weight;
-                
-            } else if (header === 'QT') {
-                throw new Error('個数モードのデータです');
-            } else if (header === 'US') {
-                throw new Error('データが安定していません');
-            } else if (header === 'OL') {
-                throw new Error('データが計量範囲を超えています');
-            } else {
-                throw new Error('未知のヘッダです');
-            }
-            
-        } catch (error) {
-            console.error('--- データ解析エラー ---:', error);
-            throw error;
-        }
-    }
-
-    // --- 以下、変更のないヘルパー関数 ---
-
-    function toggleContinuousMonitoring() {
-        if (continuousMonitoring) stopContinuousMonitoring();
-        else startContinuousMonitoring();
-    }
-
-    function startContinuousMonitoring() {
-        continuousMonitoring = true;
-        const btn = document.getElementById('monitoringBtn');
-        btn.textContent = '連続監視停止';
-        btn.style.backgroundColor = '#f44336';
-        monitoringInterval = setInterval(() => {
-            const ts = new Date().toISOString();
-            if (receivedDataBuffer) {
-                const diff = Date.now() - new Date(receivedDataBuffer.timestamp).getTime();
-                console.log(`[${ts}] 最新データあり (${diff}ms前)`);
-            } else {
-                console.log(`[${ts}] データ待機中...`);
-            }
-        }, 1000);
-        updateInfoMessage('連続監視を開始しました');
-    }
-
-    function stopContinuousMonitoring() {
-        continuousMonitoring = false;
-        const btn = document.getElementById('monitoringBtn');
-        btn.textContent = '連続監視開始';
-        btn.style.backgroundColor = '#9C27B0';
-        if (monitoringInterval) clearInterval(monitoringInterval);
-        monitoringInterval = null;
-        if (!simulationMode) updateInfoMessage('連続監視を停止しました');
-    }
-
-    function toggleSimulationMode() {
-        simulationMode = !simulationMode;
-        const simBtn = document.getElementById('simulationBtn');
-        const connBtn = document.getElementById('connectBtn');
-        const disconnBtn = document.getElementById('disconnectBtn');
-        if (simulationMode) {
-            simBtn.textContent = 'シミュレーション中';
-            simBtn.style.backgroundColor = '#4CAF50';
-            updateConnectionStatus(true);
-            updateInfoMessage('シミュレーションモードが有効です');
-            connBtn.disabled = true;
-            disconnBtn.disabled = true;
+        if (header === 'ST') {
+            const parts = responseStr.split(',');
+            if (parts.length < 2) throw new Error('データ形式不正 (セパレータなし)');
+            const weight = parseFloat(parts[1]);
+            if (isNaN(weight)) throw new Error('重量の数値変換に失敗');
+            return weight;
+        } else if (header === 'US') {
+            throw new Error('データ不安定');
+        } else if (header === 'OL') {
+            throw new Error('過重量');
         } else {
-            simBtn.textContent = 'シミュレーション';
-            simBtn.style.backgroundColor = '#FF9800';
-            updateConnectionStatus(false);
-            updateInfoMessage('シミュレーションモードが無効です');
-            connBtn.disabled = false;
-            disconnBtn.disabled = false;
-            clearWeightDisplays();
-            stopContinuousMonitoring();
-            dataAccumulator = '';
+            throw new Error('未知のヘッダ');
         }
     }
 
-    function clearWeightDisplays() {
-        document.getElementById('weightDisplay1').textContent = '--.-- g';
-        document.getElementById('weightDisplay2').textContent = '--.-- g';
-        clearErrorMessage(1);
-        clearErrorMessage(2);
-    }
-
-    function updateConnectionStatus(connected) {
-        const statusEl = document.getElementById('connectionStatus');
-        const connBtn = document.getElementById('connectBtn');
-        const disconnBtn = document.getElementById('disconnectBtn');
-        const getW1Btn = document.getElementById('getWeight1Btn');
-        const getW2Btn = document.getElementById('getWeight2Btn');
-        const monBtn = document.getElementById('monitoringBtn');
-        if (connected) {
-            const statusText = simulationMode ? 'シミュレーション接続' : '接続済み';
-            statusEl.innerHTML = `状態: <span class="connected">${statusText}</span>`;
-            connBtn.disabled = true;
-            disconnBtn.disabled = simulationMode ? true : false;
-            getW1Btn.disabled = false;
-            getW2Btn.disabled = false;
-            monBtn.disabled = false;
-        } else {
-            statusEl.innerHTML = '状態: <span class="disconnected">未接続</span>';
-            connBtn.disabled = simulationMode ? true : false;
-            disconnBtn.disabled = true;
-            getW1Btn.disabled = true;
-            getW2Btn.disabled = true;
-            monBtn.disabled = true;
-            stopContinuousMonitoring();
-        }
-    }
-
-    function updateInfoMessage(message) {
-        document.getElementById('infoMessage').textContent = message;
-    }
-
-    function showErrorMessage(areaNumber, message) {
-        document.getElementById('errorMessage' + areaNumber).textContent = message;
-    }
-
-    function clearErrorMessage(areaNumber) {
-        document.getElementById('errorMessage' + areaNumber).textContent = '';
-    }
-
-    document.addEventListener('DOMContentLoaded', function() {
-        updateConnectionStatus(false);
-    });
+    // --- 以下、変更のないヘルパー関数群 ---
+    function toggleContinuousMonitoring(){if(continuousMonitoring)stopContinuousMonitoring();else startContinuousMonitoring();}
+    function startContinuousMonitoring(){continuousMonitoring=!0;const e=document.getElementById("monitoringBtn");e.textContent="連続監視停止",e.style.backgroundColor="#f44336",monitoringInterval=setInterval(()=>{const e=(new Date).toISOString();receivedDataBuffer?console.log(`[${e}] 最新データあり`):console.log(`[${e}] データ待機中...`)},1e3),updateInfoMessage("連続監視を開始しました")}
+    function stopContinuousMonitoring(){continuousMonitoring=!1;const e=document.getElementById("monitoringBtn");e.textContent="連続監視開始",e.style.backgroundColor="#9C27B0",monitoringInterval&&clearInterval(monitoringInterval),monitoringInterval=null,simulationMode||updateInfoMessage("連続監視を停止しました")}
+    function toggleSimulationMode(){simulationMode=!simulationMode;const e=document.getElementById("simulationBtn"),t=document.getElementById("connectBtn"),n=document.getElementById("disconnectBtn");simulationMode?(e.textContent="シミュレーション中",e.style.backgroundColor="#4CAF50",updateConnectionStatus(!0),updateInfoMessage("シミュレーションモードが有効です"),t.disabled=!0,n.disabled=!0):(e.textContent="シミュレーション",e.style.backgroundColor="#FF9800",updateConnectionStatus(!1),updateInfoMessage("シミュレーションモードが無効です"),t.disabled=!1,n.disabled=!1,clearWeightDisplays(),stopContinuousMonitoring(),dataAccumulator="")}
+    function clearWeightDisplays(){document.getElementById("weightDisplay1").textContent="--.-- g",document.getElementById("weightDisplay2").textContent="--.-- g",clearErrorMessage(1),clearErrorMessage(2)}
+    function updateConnectionStatus(e){const t=document.getElementById("connectionStatus"),n=document.getElementById("connectBtn"),o=document.getElementById("disconnectBtn"),i=document.getElementById("getWeight1Btn"),a=document.getElementById("getWeight2Btn"),c=document.getElementById("monitoringBtn");e?(t.innerHTML=`状態: <span class="connected">${simulationMode?"シミュレーション接続":"接続済み"}</span>`,n.disabled=!0,o.disabled=!!simulationMode,i.disabled=!1,a.disabled=!1,c.disabled=!1):(t.innerHTML='状態: <span class="disconnected">未接続</span>',n.disabled=!!simulationMode,o.disabled=!0,i.disabled=!0,a.disabled=!0,c.disabled=!0,stopContinuousMonitoring())}
+    function updateInfoMessage(e){document.getElementById("infoMessage").textContent=e}
+    function showErrorMessage(e,t){document.getElementById("errorMessage"+e).textContent=t}
+    function clearErrorMessage(e){document.getElementById("errorMessage"+e).textContent=""}
 </script>
 </body>
 </html>
+
 
 
 
