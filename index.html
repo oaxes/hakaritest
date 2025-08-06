@@ -147,6 +147,12 @@
     let monitoringInterval = null;
     let receivedDataBuffer = null;
     let dataAccumulator = '';  // 分割データを蓄積するバッファ
+    
+    /**
+     * 【修正点1】最後に押されたボタンを記憶する変数を追加
+     *  - この変数に重量取得をリクエストしたエリア番号（1 or 2）を保存します。
+     */
+    let currentRequestArea = 1;
 
     // SDKの仕様に基づく設定値
     const SERVICE_UUID = '5699d362-0c53-11e7-93ae-92361f002671';
@@ -208,7 +214,11 @@
         }
     }
 
-    // データ受信時の処理（データ結合ロジック）
+    /**
+     * 【修正点2】データ受信時に、記憶したエリア番号を元に画面を更新
+     *  - `currentRequestArea` の値（1 or 2）を使って、対応する表示エリアを動的に選択します。
+     *  - これにより、押されたボタンに応じた場所に重量が表示されるようになります。
+     */
     function handleNotification(event) {
         const value = event.target.value;
         const timestamp = new Date().toISOString();
@@ -233,13 +243,21 @@
                 const weight = parseWeightData(receivedDataBuffer.dataView);
                 console.log(`[${timestamp}] 解析成功: ${weight}g`);
                 
-                // 暫定的に測定値1のエリアに結果を表示
-                document.getElementById('weightDisplay1').textContent = weight.toFixed(2) + ' g';
-                clearErrorMessage(1);
+                // currentRequestArea を使って、更新対象のUI要素を動的に決定
+                document.getElementById('weightDisplay' + currentRequestArea).textContent = weight.toFixed(2) + ' g';
+                clearErrorMessage(currentRequestArea);
+
+                // 対応するグローバル変数も更新
+                if (currentRequestArea === 1) {
+                    weight1 = weight;
+                } else {
+                    weight2 = weight;
+                }
 
             } catch (error) {
                 console.error(`[${timestamp}] 解析エラー:`, error.message);
-                showErrorMessage(1, `解析エラー: ${error.message}`);
+                // エラー表示も動的に行う
+                showErrorMessage(currentRequestArea, `解析エラー: ${error.message}`);
             }
         }
     }
@@ -265,9 +283,9 @@
     }
 
     /**
-     * 【修正箇所】重量取得処理の簡略化
-     *  - 動作が確認できた「通常のWrite」によるコマンド送信のみに処理を絞りました。
-     *  - Read-onlyやWriteWithoutResponseの試行ロジックは削除されています。
+     * 【修正点3】重量取得ボタンが押された際に、どのボタンか記憶する
+     *  - コマンドを送信する直前に、引数で渡された `areaNumber` を
+     *    グローバル変数 `currentRequestArea` に保存します。
      */
     async function getWeight(areaNumber) {
         try {
@@ -280,22 +298,20 @@
                 return;
             }
 
-            // 接続状態とキャラクタリスティックの存在を確認
             if (!bluetoothDevice || !bluetoothDevice.gatt.connected || !writeCharacteristic) {
                 throw new Error('電子秤と接続されていません。再接続してください。');
             }
 
+            // ★どのエリアからのリクエストかを変数に記憶
+            currentRequestArea = areaNumber;
+
             console.log(`[エリア${areaNumber}] 重量取得コマンドを送信します...`);
 
-            // 秤に重量データの送信を要求するコマンド ('Q\r\n') を送信
             const command = new TextEncoder().encode('Q\r\n');
             await writeCharacteristic.writeValue(command);
 
             console.log('コマンド送信成功。秤からの応答（通知）を待機します。');
             updateInfoMessage('データ受信待機中...');
-
-            // データ受信後の処理（解析と表示）は、
-            // イベントリスナーに登録された handleNotification 関数が自動的に行います。
 
         } catch (error) {
             console.error(`[エリア${areaNumber}] 重量取得エラー:`, error);
@@ -307,7 +323,7 @@
         }
     }
 
-    // 重量データの解析（ログ出力付き）
+    // 重量データの解析（変更なし）
     function parseWeightData(dataView) {
         try {
             const responseStr = new TextDecoder().decode(dataView.buffer).trim();
@@ -315,9 +331,7 @@
             console.log('--- データ解析開始 ---');
             console.log('解析対象の文字列:', `'${responseStr}'`);
 
-            if (responseStr.length < 2) {
-                throw new Error('データが短すぎます');
-            }
+            if (responseStr.length < 2) throw new Error('データが短すぎます');
             
             const header = responseStr.substring(0, 2);
             console.log('抽出されたヘッダ:', `'${header}'`);
@@ -351,71 +365,57 @@
 
     // --- 以下、変更のないヘルパー関数 ---
 
-    // 連続監視の切り替え
     function toggleContinuousMonitoring() {
-        if (continuousMonitoring) {
-            stopContinuousMonitoring();
-        } else {
-            startContinuousMonitoring();
-        }
+        if (continuousMonitoring) stopContinuousMonitoring();
+        else startContinuousMonitoring();
     }
 
-    // 連続監視の開始
     function startContinuousMonitoring() {
         continuousMonitoring = true;
-        const monitoringBtn = document.getElementById('monitoringBtn');
-        monitoringBtn.textContent = '連続監視停止';
-        monitoringBtn.style.backgroundColor = '#f44336';
-        
+        const btn = document.getElementById('monitoringBtn');
+        btn.textContent = '連続監視停止';
+        btn.style.backgroundColor = '#f44336';
         monitoringInterval = setInterval(() => {
-            const timestamp = new Date().toISOString();
+            const ts = new Date().toISOString();
             if (receivedDataBuffer) {
-                const timeDiff = Date.now() - new Date(receivedDataBuffer.timestamp).getTime();
-                console.log(`[${timestamp}] 最新データあり (${timeDiff}ms前)`);
+                const diff = Date.now() - new Date(receivedDataBuffer.timestamp).getTime();
+                console.log(`[${ts}] 最新データあり (${diff}ms前)`);
             } else {
-                console.log(`[${timestamp}] データ待機中...`);
+                console.log(`[${ts}] データ待機中...`);
             }
         }, 1000);
         updateInfoMessage('連続監視を開始しました');
     }
 
-    // 連続監視の停止
     function stopContinuousMonitoring() {
         continuousMonitoring = false;
-        const monitoringBtn = document.getElementById('monitoringBtn');
-        monitoringBtn.textContent = '連続監視開始';
-        monitoringBtn.style.backgroundColor = '#9C27B0';
-        
-        if (monitoringInterval) {
-            clearInterval(monitoringInterval);
-            monitoringInterval = null;
-        }
-        if (!simulationMode) {
-            updateInfoMessage('連続監視を停止しました');
-        }
+        const btn = document.getElementById('monitoringBtn');
+        btn.textContent = '連続監視開始';
+        btn.style.backgroundColor = '#9C27B0';
+        if (monitoringInterval) clearInterval(monitoringInterval);
+        monitoringInterval = null;
+        if (!simulationMode) updateInfoMessage('連続監視を停止しました');
     }
 
-    // シミュレーションモードの切り替え
     function toggleSimulationMode() {
         simulationMode = !simulationMode;
-        const simulationBtn = document.getElementById('simulationBtn');
-        const connectBtn = document.getElementById('connectBtn');
-        const disconnectBtn = document.getElementById('disconnectBtn');
-        
+        const simBtn = document.getElementById('simulationBtn');
+        const connBtn = document.getElementById('connectBtn');
+        const disconnBtn = document.getElementById('disconnectBtn');
         if (simulationMode) {
-            simulationBtn.textContent = 'シミュレーション中';
-            simulationBtn.style.backgroundColor = '#4CAF50';
+            simBtn.textContent = 'シミュレーション中';
+            simBtn.style.backgroundColor = '#4CAF50';
             updateConnectionStatus(true);
             updateInfoMessage('シミュレーションモードが有効です');
-            connectBtn.disabled = true;
-            disconnectBtn.disabled = true;
+            connBtn.disabled = true;
+            disconnBtn.disabled = true;
         } else {
-            simulationBtn.textContent = 'シミュレーション';
-            simulationBtn.style.backgroundColor = '#FF9800';
+            simBtn.textContent = 'シミュレーション';
+            simBtn.style.backgroundColor = '#FF9800';
             updateConnectionStatus(false);
             updateInfoMessage('シミュレーションモードが無効です');
-            connectBtn.disabled = false;
-            disconnectBtn.disabled = false;
+            connBtn.disabled = false;
+            disconnBtn.disabled = false;
             clearWeightDisplays();
             stopContinuousMonitoring();
             dataAccumulator = '';
@@ -430,28 +430,27 @@
     }
 
     function updateConnectionStatus(connected) {
-        const statusElement = document.getElementById('connectionStatus');
-        const connectBtn = document.getElementById('connectBtn');
-        const disconnectBtn = document.getElementById('disconnectBtn');
-        const getWeight1Btn = document.getElementById('getWeight1Btn');
-        const getWeight2Btn = document.getElementById('getWeight2Btn');
-        const monitoringBtn = document.getElementById('monitoringBtn');
-        
+        const statusEl = document.getElementById('connectionStatus');
+        const connBtn = document.getElementById('connectBtn');
+        const disconnBtn = document.getElementById('disconnectBtn');
+        const getW1Btn = document.getElementById('getWeight1Btn');
+        const getW2Btn = document.getElementById('getWeight2Btn');
+        const monBtn = document.getElementById('monitoringBtn');
         if (connected) {
             const statusText = simulationMode ? 'シミュレーション接続' : '接続済み';
-            statusElement.innerHTML = `状態: <span class="connected">${statusText}</span>`;
-            connectBtn.disabled = true;
-            disconnectBtn.disabled = simulationMode ? true : false;
-            getWeight1Btn.disabled = false;
-            getWeight2Btn.disabled = false;
-            monitoringBtn.disabled = false;
+            statusEl.innerHTML = `状態: <span class="connected">${statusText}</span>`;
+            connBtn.disabled = true;
+            disconnBtn.disabled = simulationMode ? true : false;
+            getW1Btn.disabled = false;
+            getW2Btn.disabled = false;
+            monBtn.disabled = false;
         } else {
-            statusElement.innerHTML = '状態: <span class="disconnected">未接続</span>';
-            connectBtn.disabled = simulationMode ? true : false;
-            disconnectBtn.disabled = true;
-            getWeight1Btn.disabled = true;
-            getWeight2Btn.disabled = true;
-            monitoringBtn.disabled = true;
+            statusEl.innerHTML = '状態: <span class="disconnected">未接続</span>';
+            connBtn.disabled = simulationMode ? true : false;
+            disconnBtn.disabled = true;
+            getW1Btn.disabled = true;
+            getW2Btn.disabled = true;
+            monBtn.disabled = true;
             stopContinuousMonitoring();
         }
     }
@@ -474,5 +473,6 @@
 </script>
 </body>
 </html>
+
 
 
