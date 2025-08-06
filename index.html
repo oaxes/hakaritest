@@ -245,35 +245,17 @@
                     throw new Error('キャラクタリスティックが取得できていません。再接続してください。');
                 }
                 
-                console.log('コマンド送信開始...');
+                console.log('重量取得開始...');
                 
-                // 計量データ要求コマンド "Q\r\n" を送信
-                const command = new TextEncoder().encode('Q\r\n');
-                console.log('送信コマンド:', command);
-                
+                // 方法1: Readのみで試す（コマンド送信なし）
+                console.log('方法1: Read-onlyでデータ取得を試行...');
                 try {
-                    await writeCharacteristic.writeValue(command);
-                    console.log('コマンド送信成功');
-                } catch (writeError) {
-                    console.error('コマンド送信エラー:', writeError);
-                    throw new Error('コマンド送信に失敗しました: ' + writeError.message);
-                }
-                
-                // 応答待機時間を延長
-                console.log('応答待機中...');
-                await new Promise(resolve => setTimeout(resolve, 1000));
-                
-                // 応答データの読み取り
-                try {
-                    console.log('データ読み取り開始...');
                     const value = await readCharacteristic.readValue();
-                    console.log('受信データ:', value);
+                    console.log('Read-only成功 受信データ:', value);
                     console.log('データサイズ:', value.byteLength, 'bytes');
                     
-                    // データフォーマットの解析
                     const weight = parseWeightData(value);
                     
-                    // 取得した重量を保持・表示
                     if (areaNumber === 1) {
                         weight1 = weight;
                         document.getElementById('weightDisplay1').textContent = weight.toFixed(2) + ' g';
@@ -281,9 +263,61 @@
                         weight2 = weight;
                         document.getElementById('weightDisplay2').textContent = weight.toFixed(2) + ' g';
                     }
-                } catch (readError) {
-                    console.error('データ読み取りエラー:', readError);
-                    throw new Error('データ読み取りに失敗しました: ' + readError.message);
+                    return; // 成功したら終了
+                    
+                } catch (readOnlyError) {
+                    console.log('Read-only失敗:', readOnlyError);
+                }
+                
+                // 方法2: 認証なしWrite (WriteWithoutResponse)
+                console.log('方法2: WriteWithoutResponseを試行...');
+                try {
+                    if (writeCharacteristic.properties.writeWithoutResponse) {
+                        const command = new TextEncoder().encode('Q\r\n');
+                        await writeCharacteristic.writeValueWithoutResponse(command);
+                        console.log('WriteWithoutResponse成功');
+                        
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+                        
+                        const value = await readCharacteristic.readValue();
+                        console.log('方法2 受信データ:', value);
+                        
+                        const weight = parseWeightData(value);
+                        
+                        if (areaNumber === 1) {
+                            weight1 = weight;
+                            document.getElementById('weightDisplay1').textContent = weight.toFixed(2) + ' g';
+                        } else {
+                            weight2 = weight;
+                            document.getElementById('weightDisplay2').textContent = weight.toFixed(2) + ' g';
+                        }
+                        return;
+                    }
+                } catch (writeWithoutResponseError) {
+                    console.log('WriteWithoutResponse失敗:', writeWithoutResponseError);
+                }
+                
+                // 方法3: 通常のWrite（元の方法）
+                console.log('方法3: 通常のWriteを試行...');
+                const command = new TextEncoder().encode('Q\r\n');
+                console.log('送信コマンド:', command);
+                
+                await writeCharacteristic.writeValue(command);
+                console.log('通常のWrite成功');
+                
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                
+                const value = await readCharacteristic.readValue();
+                console.log('方法3 受信データ:', value);
+                
+                const weight = parseWeightData(value);
+                
+                if (areaNumber === 1) {
+                    weight1 = weight;
+                    document.getElementById('weightDisplay1').textContent = weight.toFixed(2) + ' g';
+                } else {
+                    weight2 = weight;
+                    document.getElementById('weightDisplay2').textContent = weight.toFixed(2) + ' g';
                 }
                 
             } catch (error) {
