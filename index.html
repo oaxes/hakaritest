@@ -318,67 +318,139 @@
                 if (!readCharacteristic || !writeCharacteristic) {
                     throw new Error('キャラクタリスティックが取得できていません。再接続してください。');
                 }
-                
-                // コマンド送信（バイナリデータで送信）
-                const commandBytes = new Uint8Array([0x51, 0x0D, 0x0A]); // "Q" + CR + LF
-                addDebugLog(`コマンド送信: ${bytesToHex(commandBytes)} ("Q\\r\\n")`);
-                
+
+                // 方法1: Read-onlyでデータを取得（コマンド送信なし）
+                addDebugLog('方法1: Read-onlyでデータ取得を試行...');
                 try {
-                    // WriteWithoutResponseを優先して使用
+                    const value = await readCharacteristic.readValue();
+                    addDebugLog(`Read-only成功 受信データ: ${value.byteLength} bytes`);
+                    addDebugLog(`受信バイナリ: ${bytesToHex(new Uint8Array(value.buffer))}`);
+                    
+                    const weight = parseWeightData(value);
+                    
+                    if (areaNumber === 1) {
+                        weight1 = weight;
+                        document.getElementById('weightDisplay1').textContent = weight.toFixed(2) + ' g';
+                    } else {
+                        weight2 = weight;
+                        document.getElementById('weightDisplay2').textContent = weight.toFixed(2) + ' g';
+                    }
+                    addDebugLog(`Read-only取得完了: ${weight.toFixed(2)} g`);
+                    return;
+                    
+                } catch (readOnlyError) {
+                    addDebugLog(`Read-only失敗: ${readOnlyError.message}`);
+                }
+
+                // 方法2: Notificationを有効にしてデータを受信
+                addDebugLog('方法2: Notificationによるデータ受信を試行...');
+                try {
+                    if (readCharacteristic.properties.notify) {
+                        // 通知を有効化
+                        await readCharacteristic.startNotifications();
+                        addDebugLog('Notification有効化成功');
+                        
+                        // 通知データを受信するPromise
+                        const notificationPromise = new Promise((resolve, reject) => {
+                            const timeout = setTimeout(() => {
+                                reject(new Error('Notification受信タイムアウト'));
+                            }, 5000);
+                            
+                            const handler = (event) => {
+                                clearTimeout(timeout);
+                                readCharacteristic.removeEventListener('characteristicvaluechanged', handler);
+                                resolve(event.target.value);
+                            };
+                            
+                            readCharacteristic.addEventListener('characteristicvaluechanged', handler);
+                        });
+                        
+                        // コマンド送信（認証不要の方法で）
+                        const commandBytes = new Uint8Array([0x51, 0x0D, 0x0A]);
+                        addDebugLog(`コマンド送信: ${bytesToHex(commandBytes)}`);
+                        
+                        if (writeCharacteristic.properties.writeWithoutResponse) {
+                            await writeCharacteristic.writeValueWithoutResponse(commandBytes);
+                            addDebugLog('WriteWithoutResponse成功');
+                        }
+                        
+                        // 通知データ受信待機
+                        const responseData = await notificationPromise;
+                        addDebugLog(`Notification受信: ${responseData.byteLength} bytes`);
+                        addDebugLog(`受信バイナリ: ${bytesToHex(new Uint8Array(responseData.buffer))}`);
+                        
+                        // 通知を無効化
+                        await readCharacteristic.stopNotifications();
+                        
+                        const weight = parseWeightData(responseData);
+                        
+                        if (areaNumber === 1) {
+                            weight1 = weight;
+                            document.getElementById('weightDisplay1').textContent = weight.toFixed(2) + ' g';
+                        } else {
+                            weight2 = weight;
+                            document.getElementById('weightDisplay2').textContent = weight.toFixed(2) + ' g';
+                        }
+                        addDebugLog(`Notification取得完了: ${weight.toFixed(2)} g`);
+                        return;
+                        
+                    }
+                } catch (notificationError) {
+                    addDebugLog(`Notification失敗: ${notificationError.message}`);
+                }
+
+                // 方法3: シンプルなWriteWithoutResponse + 待機 + Read
+                addDebugLog('方法3: シンプルなコマンド送信を試行...');
+                try {
+                    const commandBytes = new Uint8Array([0x51, 0x0D, 0x0A]);
+                    addDebugLog(`コマンド送信: ${bytesToHex(commandBytes)}`);
+                    
                     if (writeCharacteristic.properties.writeWithoutResponse) {
                         await writeCharacteristic.writeValueWithoutResponse(commandBytes);
                         addDebugLog('WriteWithoutResponse成功');
-                    } else if (writeCharacteristic.properties.write) {
-                        await writeCharacteristic.writeValue(commandBytes);
-                        addDebugLog('Write成功');
+                        
+                        // 長めに待機
+                        await new Promise(resolve => setTimeout(resolve, 2000));
+                        
+                        const responseData = await readCharacteristic.readValue();
+                        addDebugLog(`レスポンス受信: ${responseData.byteLength} bytes`);
+                        addDebugLog(`受信バイナリ: ${bytesToHex(new Uint8Array(responseData.buffer))}`);
+                        
+                        const weight = parseWeightData(responseData);
+                        
+                        if (areaNumber === 1) {
+                            weight1 = weight;
+                            document.getElementById('weightDisplay1').textContent = weight.toFixed(2) + ' g';
+                        } else {
+                            weight2 = weight;
+                            document.getElementById('weightDisplay2').textContent = weight.toFixed(2) + ' g';
+                        }
+                        addDebugLog(`シンプルWrite取得完了: ${weight.toFixed(2)} g`);
+                        return;
+                        
                     } else {
-                        throw new Error('書き込み可能なプロパティがありません');
+                        throw new Error('WriteWithoutResponseプロパティがありません');
                     }
-                } catch (writeError) {
-                    addDebugLog(`書き込みエラー: ${writeError.message}`);
-                    throw writeError;
+                } catch (simpleWriteError) {
+                    addDebugLog(`シンプルWrite失敗: ${simpleWriteError.message}`);
+                    throw simpleWriteError;
                 }
-                
-                // レスポンス待機
-                addDebugLog('レスポンス待機中...');
-                await new Promise(resolve => setTimeout(resolve, 1000));
-                
-                // データ読み取り
-                let responseData;
-                try {
-                    responseData = await readCharacteristic.readValue();
-                    addDebugLog(`レスポンス受信: ${responseData.byteLength} bytes`);
-                    addDebugLog(`受信バイナリ: ${bytesToHex(new Uint8Array(responseData.buffer))}`);
-                } catch (readError) {
-                    addDebugLog(`読み取りエラー: ${readError.message}`);
-                    throw readError;
-                }
-                
-                // データ解析
-                const weight = parseWeightData(responseData);
-                addDebugLog(`解析結果: ${weight.toFixed(2)} g`);
-                
-                if (areaNumber === 1) {
-                    weight1 = weight;
-                    document.getElementById('weightDisplay1').textContent = weight.toFixed(2) + ' g';
-                } else {
-                    weight2 = weight;
-                    document.getElementById('weightDisplay2').textContent = weight.toFixed(2) + ' g';
-                }
-                
-                addDebugLog(`重量取得完了 (エリア${areaNumber}): ${weight.toFixed(2)} g`);
                 
             } catch (error) {
                 addDebugLog(`重量取得エラー (エリア${areaNumber}): ${error.message}`);
                 console.error('重量取得エラー:', error);
                 
-                // 接続エラーの場合は接続状態をリセット
-                if (error.message.includes('disconnected') || error.message.includes('GATT')) {
+                // 認証エラーの場合の特別な処理
+                if (error.message.includes('Authentication failed')) {
+                    showErrorMessage(areaNumber, '認証エラー: デバイスのペアリングを確認してください');
+                    updateInfoMessage('認証エラー: スマホのBluetooth設定でデバイスをペアリングしてください');
+                } else if (error.message.includes('disconnected') || error.message.includes('GATT')) {
                     updateConnectionStatus(false);
                     updateInfoMessage('接続が切断されました。再接続してください。');
+                    showErrorMessage(areaNumber, '接続エラー: ' + error.message);
+                } else {
+                    showErrorMessage(areaNumber, '重量取得エラー: ' + error.message);
                 }
-                
-                showErrorMessage(areaNumber, '重量取得エラー: ' + error.message);
             }
         }
 
