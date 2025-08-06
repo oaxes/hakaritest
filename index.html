@@ -98,23 +98,6 @@
             font-size: 14px;
             margin-top: 10px;
         }
-        .debug-section {
-            margin-top: 20px;
-            padding: 15px;
-            background-color: #f0f0f0;
-            border-radius: 5px;
-            font-family: monospace;
-            font-size: 12px;
-        }
-        .debug-title {
-            font-weight: bold;
-            margin-bottom: 10px;
-        }
-        .debug-log {
-            max-height: 200px;
-            overflow-y: auto;
-            white-space: pre-wrap;
-        }
     </style>
 </head>
 <body>
@@ -126,6 +109,7 @@
             <button class="button" id="connectBtn" onclick="connectToScale()">電子秤に接続</button>
             <button class="button" id="disconnectBtn" onclick="disconnectFromScale()" disabled>切断</button>
             <button class="button" id="simulationBtn" onclick="toggleSimulationMode()" style="background-color: #FF9800;">シミュレーション</button>
+            <button class="button" id="monitoringBtn" onclick="toggleContinuousMonitoring()" style="background-color: #9C27B0;" disabled>連続監視開始</button>
             <div class="info-message" id="infoMessage">※ HTTPS接続でのみ動作します</div>
         </div>
 
@@ -148,12 +132,6 @@
                 <div class="error-message" id="errorMessage2"></div>
             </div>
         </div>
-        
-        <!-- デバッグ情報表示 -->
-        <div class="debug-section">
-            <div class="debug-title">デバッグ情報: (低速通信モード対応)</div>
-            <div class="debug-log" id="debugLog">システム起動中...\n4800bps以下の低速通信に対応しています\n</div>
-        </div>
     </div>
 
     <script>
@@ -165,11 +143,14 @@
         let writeCharacteristic = null;
         let weight1 = null;
         let weight2 = null;
+        let continuousMonitoring = false;
+        let monitoringInterval = null;
+        let receivedDataBuffer = null;
 
         // SDKの仕様に基づく設定値
         const SERVICE_UUID = '5699d362-0c53-11e7-93ae-92361f002671';
-        const READ_CHARACTERISTIC_UUID = '5699d646-0c53-11e7-93ae-92361f002671';
-        const WRITE_CHARACTERISTIC_UUID = '5699d772-0c53-11e7-93ae-92361f002671';
+        const READ_CHARACTERISTIC_UUID = '5699d646-0c53-11e7-93ae-92361f002671';  // Peripheral→Central
+        const WRITE_CHARACTERISTIC_UUID = '5699d772-0c53-11e7-93ae-92361f002671'; // Central→Peripheral
         const DEVICE_NAME_PREFIX = 'A&D_BT_';
         
         // シミュレーションモードの設定
@@ -177,97 +158,87 @@
         const SIMULATION_WEIGHT_1 = 23.5;
         const SIMULATION_WEIGHT_2 = 154.8;
 
-        // デバッグログ機能
-        function addDebugLog(message) {
-            const debugLog = document.getElementById('debugLog');
-            const timestamp = new Date().toLocaleTimeString();
-            debugLog.textContent += `[${timestamp}] ${message}\n`;
-            debugLog.scrollTop = debugLog.scrollHeight;
-            console.log(`[${timestamp}] ${message}`);
-        }
-
-        // バイト配列を16進数文字列に変換
-        function bytesToHex(bytes) {
-            return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join(' ');
-        }
-
         // Web Bluetooth API対応チェック
         if (!navigator.bluetooth) {
             document.getElementById('infoMessage').textContent = 'このブラウザはWeb Bluetooth APIに対応していません';
             document.getElementById('connectBtn').disabled = true;
-            addDebugLog('Web Bluetooth API 非対応');
-        } else {
-            addDebugLog('Web Bluetooth API 対応済み');
         }
 
         // 電子秤への接続
         async function connectToScale() {
             try {
-                addDebugLog('接続開始...');
                 updateInfoMessage('接続中...');
                 
-                // デバイスの検索・選択
-                addDebugLog(`デバイス検索中 (prefix: ${DEVICE_NAME_PREFIX})`);
+                // デバイスの検索・選択（A&D_HID_で始まるデバイスを検索）
                 bluetoothDevice = await navigator.bluetooth.requestDevice({
                     filters: [{ namePrefix: DEVICE_NAME_PREFIX }],
                     optionalServices: [SERVICE_UUID]
                 });
 
-                addDebugLog(`デバイス選択: ${bluetoothDevice.name} (${bluetoothDevice.id})`);
-
-                // 切断イベントのリスナーを設定
-                bluetoothDevice.addEventListener('gattserverdisconnected', onDisconnected);
-
                 // GATTサーバーに接続
-                addDebugLog('GATT接続中...');
                 bluetoothServer = await bluetoothDevice.gatt.connect();
-                addDebugLog('GATT接続完了');
                 
                 // サービスの取得
-                addDebugLog(`サービス取得中... (UUID: ${SERVICE_UUID})`);
                 service = await bluetoothServer.getPrimaryService(SERVICE_UUID);
-                addDebugLog('サービス取得完了');
                 
                 // キャラクタリスティックの取得
-                addDebugLog(`READ特性取得中... (UUID: ${READ_CHARACTERISTIC_UUID})`);
                 readCharacteristic = await service.getCharacteristic(READ_CHARACTERISTIC_UUID);
-                addDebugLog(`READ特性取得完了 (properties: read=${readCharacteristic.properties.read}, notify=${readCharacteristic.properties.notify})`);
-                
-                addDebugLog(`WRITE特性取得中... (UUID: ${WRITE_CHARACTERISTIC_UUID})`);
                 writeCharacteristic = await service.getCharacteristic(WRITE_CHARACTERISTIC_UUID);
-                addDebugLog(`WRITE特性取得完了 (properties: write=${writeCharacteristic.properties.write}, writeWithoutResponse=${writeCharacteristic.properties.writeWithoutResponse})`);
+                
+                // 通知の設定（データ受信の待機）
+                await setupNotification();
                 
                 // 接続状態の更新
                 updateConnectionStatus(true);
                 updateInfoMessage('接続成功: ' + bluetoothDevice.name);
-                addDebugLog('接続成功');
                 
             } catch (error) {
-                addDebugLog(`接続エラー: ${error.name}: ${error.message}`);
                 console.error('接続エラー:', error);
                 updateInfoMessage('接続エラー: ' + error.message);
                 updateConnectionStatus(false);
             }
         }
 
-        // 切断イベントハンドラ
-        function onDisconnected() {
-            addDebugLog('デバイスが切断されました');
-            updateConnectionStatus(false);
-            updateInfoMessage('デバイスが切断されました');
+        // 通知の設定
+        async function setupNotification() {
+            try {
+                if (readCharacteristic && readCharacteristic.properties.notify) {
+                    console.log('通知機能を有効化中...');
+                    await readCharacteristic.startNotifications();
+                    
+                    // データ受信時のイベントハンドラを設定
+                    readCharacteristic.addEventListener('characteristicvaluechanged', handleNotification);
+                    console.log('通知機能が有効化されました');
+                } else {
+                    console.log('通知機能は利用できません');
+                }
+            } catch (error) {
+                console.error('通知設定エラー:', error);
+            }
+        }
+
+        // データ受信時の処理
+        function handleNotification(event) {
+            const value = event.target.value;
+            const timestamp = new Date().toISOString();
             
-            // 変数をリセット
-            bluetoothDevice = null;
-            bluetoothServer = null;
-            service = null;
-            readCharacteristic = null;
-            writeCharacteristic = null;
+            // 受信データをバッファに保存
+            receivedDataBuffer = {
+                timestamp: timestamp,
+                dataView: value,
+                rawData: new Uint8Array(value.buffer),
+                stringData: new TextDecoder().decode(new Uint8Array(value.buffer))
+            };
+            
+            console.log(`[${timestamp}] データ受信:`, receivedDataBuffer.stringData);
         }
 
         // 電子秤からの切断
         async function disconnectFromScale() {
             try {
-                addDebugLog('切断処理開始...');
+                // 連続監視を停止
+                stopContinuousMonitoring();
+                
                 if (bluetoothDevice && bluetoothDevice.gatt.connected) {
                     await bluetoothDevice.gatt.disconnect();
                 }
@@ -280,12 +251,70 @@
                 
                 updateConnectionStatus(false);
                 updateInfoMessage('切断しました');
-                addDebugLog('切断完了');
                 
             } catch (error) {
-                addDebugLog(`切断エラー: ${error.message}`);
                 console.error('切断エラー:', error);
                 updateInfoMessage('切断エラー: ' + error.message);
+            }
+        }
+
+        // 連続監視の切り替え
+        function toggleContinuousMonitoring() {
+            if (continuousMonitoring) {
+                stopContinuousMonitoring();
+            } else {
+                startContinuousMonitoring();
+            }
+        }
+
+        // 連続監視の開始
+        function startContinuousMonitoring() {
+            continuousMonitoring = true;
+            const monitoringBtn = document.getElementById('monitoringBtn');
+            monitoringBtn.textContent = '連続監視停止';
+            monitoringBtn.style.backgroundColor = '#f44336';
+            
+            // 1秒ごとにデータをログ出力
+            monitoringInterval = setInterval(() => {
+                const timestamp = new Date().toISOString();
+                
+                if (simulationMode) {
+                    // シミュレーションデータを出力
+                    console.log(`[${timestamp}] シミュレーションデータ: 測定値1=${SIMULATION_WEIGHT_1}g, 測定値2=${SIMULATION_WEIGHT_2}g`);
+                } else if (receivedDataBuffer) {
+                    // 最新の受信データを出力
+                    const timeDiff = Date.now() - new Date(receivedDataBuffer.timestamp).getTime();
+                    console.log(`[${timestamp}] 最新データ (${timeDiff}ms前):`, receivedDataBuffer.stringData);
+                    console.log(`[${timestamp}] Raw bytes:`, Array.from(receivedDataBuffer.rawData).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' '));
+                    
+                    try {
+                        const weight = parseWeightData(receivedDataBuffer.dataView);
+                        console.log(`[${timestamp}] 解析結果: ${weight}g`);
+                    } catch (error) {
+                        console.log(`[${timestamp}] 解析エラー:`, error.message);
+                    }
+                } else {
+                    console.log(`[${timestamp}] データ待機中...`);
+                }
+            }, 1000);
+            
+            updateInfoMessage('連続監視を開始しました (1秒間隔)');
+        }
+
+        // 連続監視の停止
+        function stopContinuousMonitoring() {
+            continuousMonitoring = false;
+            const monitoringBtn = document.getElementById('monitoringBtn');
+            monitoringBtn.textContent = '連続監視開始';
+            monitoringBtn.style.backgroundColor = '#9C27B0';
+            
+            if (monitoringInterval) {
+                clearInterval(monitoringInterval);
+                monitoringInterval = null;
+            }
+            
+            if (!simulationMode) {
+                updateInfoMessage('連続監視を停止しました');
             }
         }
 
@@ -293,12 +322,13 @@
         async function getWeight(areaNumber) {
             try {
                 clearErrorMessage(areaNumber);
-                addDebugLog(`重量取得開始 (エリア${areaNumber})`);
                 
                 // シミュレーションモードの処理
                 if (simulationMode) {
+                    // シミュレーション用の重量データ
                     const weight = areaNumber === 1 ? SIMULATION_WEIGHT_1 : SIMULATION_WEIGHT_2;
                     
+                    // 取得した重量を保持・表示
                     if (areaNumber === 1) {
                         weight1 = weight;
                         document.getElementById('weightDisplay1').textContent = weight.toFixed(2) + ' g';
@@ -306,7 +336,6 @@
                         weight2 = weight;
                         document.getElementById('weightDisplay2').textContent = weight.toFixed(2) + ' g';
                     }
-                    addDebugLog(`シミュレーション重量: ${weight.toFixed(2)} g`);
                     return;
                 }
                 
@@ -315,16 +344,19 @@
                     throw new Error('電子秤との接続が切断されています。再接続してください。');
                 }
                 
+                // 実デバイス接続の確認
                 if (!readCharacteristic || !writeCharacteristic) {
                     throw new Error('キャラクタリスティックが取得できていません。再接続してください。');
                 }
-
-                // 方法1: Read-onlyでデータを取得（コマンド送信なし）
-                addDebugLog('方法1: Read-onlyでデータ取得を試行...');
+                
+                console.log('重量取得開始...');
+                
+                // 方法1: Readのみで試す（コマンド送信なし）
+                console.log('方法1: Read-onlyでデータ取得を試行...');
                 try {
                     const value = await readCharacteristic.readValue();
-                    addDebugLog(`Read-only成功 受信データ: ${value.byteLength} bytes`);
-                    addDebugLog(`受信バイナリ: ${bytesToHex(new Uint8Array(value.buffer))}`);
+                    console.log('Read-only成功 受信データ:', value);
+                    console.log('データサイズ:', value.byteLength, 'bytes');
                     
                     const weight = parseWeightData(value);
                     
@@ -335,172 +367,26 @@
                         weight2 = weight;
                         document.getElementById('weightDisplay2').textContent = weight.toFixed(2) + ' g';
                     }
-                    addDebugLog(`Read-only取得完了: ${weight.toFixed(2)} g`);
-                    return;
+                    return; // 成功したら終了
                     
                 } catch (readOnlyError) {
-                    addDebugLog(`Read-only失敗: ${readOnlyError.message}`);
+                    console.log('Read-only失敗:', readOnlyError);
                 }
-
-                // 方法2: Notificationを有効にしてデータを受信（改良版）
-                addDebugLog('方法2: Notificationによるデータ受信を試行...');
+                
+                // 方法2: 認証なしWrite (WriteWithoutResponse)
+                console.log('方法2: WriteWithoutResponseを試行...');
                 try {
-                    if (readCharacteristic.properties.notify) {
-                        // 通知を有効化
-                        await readCharacteristic.startNotifications();
-                        addDebugLog('Notification有効化成功');
-                        
-                        let receivedDataCount = 0;
-                        let completeData = null;
-                        
-                        // 通知データを受信するPromise（複数回の受信に対応）
-                        const notificationPromise = new Promise((resolve, reject) => {
-                            const timeout = setTimeout(() => {
-                                reject(new Error('Notification受信タイムアウト'));
-                            }, 30000); // 30秒に大幅延長
-                            
-                            const handler = (event) => {
-                                const receivedData = event.target.value;
-                                receivedDataCount++;
-                                
-                                addDebugLog(`Notification受信 #${receivedDataCount}: ${receivedData.byteLength} bytes`);
-                                addDebugLog(`受信バイナリ #${receivedDataCount}: ${bytesToHex(new Uint8Array(receivedData.buffer))}`);
-                                
-                                // 受信データを文字列に変換して内容を確認
-                                const receivedStr = new TextDecoder().decode(receivedData);
-                                addDebugLog(`受信文字列 #${receivedDataCount}: "${receivedStr}" (${receivedStr.length} chars)`);
-                                
-                                // 完全なデータかチェック（17文字以上 OR ST,で始まる完全なフォーマット）
-                                if (receivedStr.length >= 17 || (receivedStr.startsWith('ST,') && receivedStr.length >= 10)) {
-                                    clearTimeout(timeout);
-                                    readCharacteristic.removeEventListener('characteristicvaluechanged', handler);
-                                    completeData = receivedData;
-                                    addDebugLog('完全なデータを受信しました');
-                                    resolve(receivedData);
-                                } else if (receivedStr.startsWith('ST')) {
-                                    // STで始まるが不完全なデータの場合、さらに長く待機
-                                    addDebugLog(`不完全なSTデータ(${receivedStr.length}文字)。追加データを15秒間待機中...`);
-                                    // 15秒追加で待機
-                                } else if (receivedDataCount >= 10) {
-                                    // 10回試行しても完全なデータが取得できない場合
-                                    clearTimeout(timeout);
-                                    readCharacteristic.removeEventListener('characteristicvaluechanged', handler);
-                                    if (receivedStr.startsWith('ST')) {
-                                        // STで始まる不完全なデータでも処理を試行
-                                        addDebugLog(`不完全なSTデータで処理を試行: "${receivedStr}"`);
-                                        resolve(receivedData);
-                                    } else {
-                                        reject(new Error(`不完全なデータのみ受信: 最大${receivedStr.length}文字`));
-                                    }
-                                }
-                            };
-                            
-                            readCharacteristic.addEventListener('characteristicvaluechanged', handler);
-                        });
-                        
-                        // 安定した測定値を得るために長時間待機
-                        addDebugLog('測定値安定のため10秒待機...');
-                        await new Promise(resolve => setTimeout(resolve, 10000));
-                        
-                        // 低速通信に対応したコマンド送信（4800bps相当の遅延）
-                        const commandBytes = new Uint8Array([0x51, 0x0D, 0x0A]);
-                        addDebugLog(`コマンド送信（超低速モード）: ${bytesToHex(commandBytes)}`);
-                        
-                        if (writeCharacteristic.properties.writeWithoutResponse) {
-                            // バイト単位で長い遅延を入れて送信
-                            for (let i = 0; i < commandBytes.length; i++) {
-                                const singleByte = new Uint8Array([commandBytes[i]]);
-                                await writeCharacteristic.writeValueWithoutResponse(singleByte);
-                                addDebugLog(`バイト送信 [${i}]: ${bytesToHex(singleByte)}`);
-                                // 超低速通信のための長い遅延（50ms per byte）
-                                await new Promise(resolve => setTimeout(resolve, 50));
-                            }
-                            addDebugLog('超低速WriteWithoutResponse完了');
-                        } else {
-                            // 一括送信の場合も遅延を入れる
-                            await writeCharacteristic.writeValue(commandBytes);
-                            addDebugLog('超低速Write完了');
-                        }
-                        
-                        // コマンド処理のための長時間待機
-                        addDebugLog('コマンド処理待機中（10秒）...');
-                        await new Promise(resolve => setTimeout(resolve, 10000));
-                        
-                        // 通知データ受信待機
-                        const responseData = await notificationPromise;
-                        
-                        // 通知を無効化
-                        await readCharacteristic.stopNotifications();
-                        
-                        const weight = parseWeightData(responseData);
-                        
-                        if (areaNumber === 1) {
-                            weight1 = weight;
-                            document.getElementById('weightDisplay1').textContent = weight.toFixed(2) + ' g';
-                        } else {
-                            weight2 = weight;
-                            document.getElementById('weightDisplay2').textContent = weight.toFixed(2) + ' g';
-                        }
-                        addDebugLog(`Notification取得完了: ${weight.toFixed(2)} g`);
-                        return;
-                        
-                    }
-                } catch (notificationError) {
-                    addDebugLog(`Notification失敗: ${notificationError.message}`);
-                }
-
-                // 方法3: シンプルなWriteWithoutResponse + 待機 + Read（低速通信対応）
-                addDebugLog('方法3: 低速通信モードでコマンド送信を試行...');
-                try {
-                    const commandBytes = new Uint8Array([0x51, 0x0D, 0x0A]);
-                    addDebugLog(`コマンド送信（低速モード）: ${bytesToHex(commandBytes)}`);
-                    
                     if (writeCharacteristic.properties.writeWithoutResponse) {
-                        // 低速通信のための段階的送信
-                        addDebugLog('段階的バイト送信開始...');
-                        for (let i = 0; i < commandBytes.length; i++) {
-                            const singleByte = new Uint8Array([commandBytes[i]]);
-                            await writeCharacteristic.writeValueWithoutResponse(singleByte);
-                            addDebugLog(`バイト [${i}] 送信: ${bytesToHex(singleByte)}`);
-                            // 4800bps相当の遅延
-                            await new Promise(resolve => setTimeout(resolve, 10));
-                        }
-                        addDebugLog('段階的送信完了');
+                        const command = new TextEncoder().encode('Q\r\n');
+                        await writeCharacteristic.writeValueWithoutResponse(command);
+                        console.log('WriteWithoutResponse成功');
                         
-                        // 電子秤の処理時間を考慮した非常に長い待機
-                        addDebugLog('電子秤処理待機中（15秒）...');
-                        await new Promise(resolve => setTimeout(resolve, 15000));
+                        await new Promise(resolve => setTimeout(resolve, 1000));
                         
-                        // 複数回の読み取り試行（間隔を長く）
-                        let responseData = null;
-                        for (let attempt = 1; attempt <= 5; attempt++) {
-                            try {
-                                addDebugLog(`データ読み取り試行 #${attempt}`);
-                                responseData = await readCharacteristic.readValue();
-                                addDebugLog(`試行 #${attempt} 成功: ${responseData.byteLength} bytes`);
-                                addDebugLog(`受信バイナリ: ${bytesToHex(new Uint8Array(responseData.buffer))}`);
-                                
-                                const testStr = new TextDecoder().decode(responseData);
-                                addDebugLog(`受信文字列: "${testStr}" (${testStr.length} chars)`);
-                                
-                                if (testStr.length >= 4) { // 4文字以上あれば処理を試行
-                                    addDebugLog(`処理可能なデータを受信: "${testStr}"`);
-                                    break;
-                                }
-                            } catch (readAttemptError) {
-                                addDebugLog(`試行 #${attempt} 失敗: ${readAttemptError.message}`);
-                                if (attempt < 5) {
-                                    addDebugLog(`3秒待機してリトライ...`);
-                                    await new Promise(resolve => setTimeout(resolve, 3000));
-                                }
-                            }
-                        }
+                        const value = await readCharacteristic.readValue();
+                        console.log('方法2 受信データ:', value);
                         
-                        if (!responseData) {
-                            throw new Error('すべての読み取り試行が失敗しました');
-                        }
-                        
-                        const weight = parseWeightData(responseData);
+                        const weight = parseWeightData(value);
                         
                         if (areaNumber === 1) {
                             weight1 = weight;
@@ -509,144 +395,101 @@
                             weight2 = weight;
                             document.getElementById('weightDisplay2').textContent = weight.toFixed(2) + ' g';
                         }
-                        addDebugLog(`低速通信取得完了: ${weight.toFixed(2)} g`);
                         return;
-                        
-                    } else {
-                        throw new Error('WriteWithoutResponseプロパティがありません');
                     }
-                } catch (slowWriteError) {
-                    addDebugLog(`低速通信失敗: ${slowWriteError.message}`);
-                    throw slowWriteError;
+                } catch (writeWithoutResponseError) {
+                    console.log('WriteWithoutResponse失敗:', writeWithoutResponseError);
+                }
+                
+                // 方法3: 通常のWrite（元の方法）
+                console.log('方法3: 通常のWriteを試行...');
+                const command = new TextEncoder().encode('Q\r\n');
+                console.log('送信コマンド:', command);
+                
+                await writeCharacteristic.writeValue(command);
+                console.log('通常のWrite成功');
+                
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                
+                const value = await readCharacteristic.readValue();
+                console.log('方法3 受信データ:', value);
+                
+                const weight = parseWeightData(value);
+                
+                if (areaNumber === 1) {
+                    weight1 = weight;
+                    document.getElementById('weightDisplay1').textContent = weight.toFixed(2) + ' g';
+                } else {
+                    weight2 = weight;
+                    document.getElementById('weightDisplay2').textContent = weight.toFixed(2) + ' g';
                 }
                 
             } catch (error) {
-                addDebugLog(`重量取得エラー (エリア${areaNumber}): ${error.message}`);
                 console.error('重量取得エラー:', error);
                 
-                // 認証エラーの場合の特別な処理
-                if (error.message.includes('Authentication failed')) {
-                    showErrorMessage(areaNumber, '認証エラー: デバイスのペアリングを確認してください');
-                    updateInfoMessage('認証エラー: スマホのBluetooth設定でデバイスをペアリングしてください');
-                } else if (error.message.includes('disconnected') || error.message.includes('GATT')) {
+                // 接続エラーの場合は接続状態をリセット
+                if (error.message.includes('disconnected') || error.message.includes('GATT')) {
                     updateConnectionStatus(false);
                     updateInfoMessage('接続が切断されました。再接続してください。');
-                    showErrorMessage(areaNumber, '接続エラー: ' + error.message);
-                } else {
-                    showErrorMessage(areaNumber, '重量取得エラー: ' + error.message);
                 }
+                
+                showErrorMessage(areaNumber, '重量取得エラー: ' + error.message);
             }
         }
 
-        // 重量データの解析（改良版 - 4文字データにも対応）
+        // 重量データの解析（SDKの仕様に基づく実装）
         function parseWeightData(dataView) {
             try {
+                // DataViewからUint8Arrayに変換
                 const uint8Array = new Uint8Array(dataView.buffer);
-                const responseStr = new TextDecoder().decode(uint8Array);
-                addDebugLog(`受信文字列: "${responseStr}" (${responseStr.length} chars)`);
                 
-                // データ長の詳細チェック
-                if (responseStr.length < 2) {
-                    throw new Error(`データ長不足: ${responseStr.length} chars`);
-                }
+                // 受信データを文字列に変換
+                const responseStr = new TextDecoder().decode(uint8Array);
+                console.log('受信データ:', responseStr);
+                
+                // データフォーマットの解析
+                // ヘッダ2Byte + セパレータ1Byte + 重量データ9Byte + 単位3Byte + ターミネータ2Byte
                 
                 // ヘッダの確認
                 const header = responseStr.substring(0, 2);
-                addDebugLog(`ヘッダ: "${header}"`);
                 
                 if (header === 'ST') {
-                    // 4文字の場合の特別処理 (ST + 2文字)
-                    if (responseStr.length === 4) {
-                        addDebugLog(`4文字STデータの処理: "${responseStr}"`);
-                        // ST + 2桁数値の可能性
-                        const numPart = responseStr.substring(2, 4);
-                        const numValue = parseInt(numPart, 10);
-                        if (!isNaN(numValue)) {
-                            addDebugLog(`4文字データから重量抽出: ${numValue}`);
-                            return numValue;
-                        } else {
-                            addDebugLog(`4文字データ - 数値変換失敗、デフォルト値0.00を返します`);
-                            return 0.00;
-                        }
+                    // 計量モードの取得データ
+                    const separator = responseStr.substring(2, 3);
+                    if (separator !== ',') {
+                        throw new Error('セパレータが不正です');
                     }
                     
-                    // 不完全なデータの場合（4文字未満または17文字未満）
-                    if (responseStr.length < 17 && responseStr.length !== 4) {
-                        addDebugLog(`不完全なSTデータ: ${responseStr.length} chars - デフォルト値0.00を返します`);
-                        return 0.00;
+                    // 重量データの抽出（9桁）
+                    const weightData = responseStr.substring(3, 12);
+                    const sign = weightData.substring(0, 1);
+                    const numberPart = weightData.substring(1, 9);
+                    
+                    // 数値に変換
+                    let weight = parseFloat(numberPart);
+                    if (sign === '-') {
+                        weight = -weight;
                     }
                     
-                    // 完全なデータの場合（17文字以上）
-                    if (responseStr.length >= 17) {
-                        const separator = responseStr.substring(2, 3);
-                        addDebugLog(`セパレータ: "${separator}"`);
-                        
-                        if (separator !== ',') {
-                            throw new Error(`セパレータが不正: "${separator}" (期待値: ",")`);
-                        }
-                        
-                        // 重量データの抽出（9桁）
-                        const weightData = responseStr.substring(3, 12);
-                        addDebugLog(`重量データ: "${weightData}"`);
-                        
-                        const sign = weightData.substring(0, 1);
-                        const numberPart = weightData.substring(1, 9);
-                        addDebugLog(`符号: "${sign}", 数値部: "${numberPart}"`);
-                        
-                        // 数値に変換（前ゼロを考慮）
-                        let weight = parseFloat(numberPart.trim());
-                        if (isNaN(weight)) {
-                            throw new Error(`数値変換エラー: "${numberPart}"`);
-                        }
-                        
-                        // 小数点位置の調整（電子秤によって異なる場合があります）
-                        if (weight > 99999) {
-                            weight = weight / 100; // 小数点以下2桁の場合
-                        } else if (weight > 9999) {
-                            weight = weight / 10;  // 小数点以下1桁の場合
-                        }
-                        
-                        if (sign === '-') {
-                            weight = -weight;
-                        }
-                        
-                        // 単位の確認
-                        const unit = responseStr.substring(12, 15);
-                        addDebugLog(`単位: "${unit}"`);
-                        
-                        addDebugLog(`最終重量: ${weight}`);
-                        return weight;
-                    }
+                    // 単位の確認
+                    const unit = responseStr.substring(12, 15);
+                    console.log('単位:', unit);
+                    
+                    return weight;
                     
                 } else if (header === 'QT') {
                     throw new Error('個数モードのデータです（計量モードに切り替えてください）');
                 } else if (header === 'US') {
-                    throw new Error('データが安定していません（しばらく待ってから再試行してください）');
-                } else if (header === 'OL') {
+                    throw new Error('データが安定していません');
+                } else if (header === 'QL') {
                     throw new Error('データが計量範囲を超えています');
                 } else {
-                    // 不明なヘッダの場合、受信データをそのまま表示
-                    addDebugLog(`未知のヘッダ: "${header}" - 全データ: "${responseStr}"`);
-                    
-                    // 数値のみのデータの場合の処理（一部の電子秤）
-                    const numericMatch = responseStr.match(/[\+\-]?\d+\.?\d*/);
-                    if (numericMatch) {
-                        const numericValue = parseFloat(numericMatch[0]);
-                        if (!isNaN(numericValue)) {
-                            addDebugLog(`数値データとして解析: ${numericValue}`);
-                            return numericValue;
-                        }
-                    }
-                    
-                    // それでも解析できない場合はデフォルト値
-                    addDebugLog(`データ解析不可 - デフォルト値0.00を返します`);
-                    return 0.00;
+                    throw new Error('未知のヘッダです: ' + header);
                 }
                 
             } catch (error) {
-                addDebugLog(`データ解析エラー: ${error.message}`);
-                // エラーの場合もデフォルト値を返してアプリを停止させない
-                return 0.00;
+                console.error('データ解析エラー:', error);
+                throw error;
             }
         }
 
@@ -664,7 +507,6 @@
                 updateInfoMessage('シミュレーションモードが有効です');
                 connectBtn.disabled = true;
                 disconnectBtn.disabled = true;
-                addDebugLog('シミュレーションモード: 有効');
             } else {
                 simulationBtn.textContent = 'シミュレーション';
                 simulationBtn.style.backgroundColor = '#FF9800';
@@ -672,8 +514,12 @@
                 updateInfoMessage('シミュレーションモードが無効です');
                 connectBtn.disabled = false;
                 disconnectBtn.disabled = false;
+                
+                // シミュレーションモード解除時に測定値をクリア
                 clearWeightDisplays();
-                addDebugLog('シミュレーションモード: 無効');
+                
+                // 連続監視も停止
+                stopContinuousMonitoring();
             }
         }
 
@@ -692,6 +538,7 @@
             const disconnectBtn = document.getElementById('disconnectBtn');
             const getWeight1Btn = document.getElementById('getWeight1Btn');
             const getWeight2Btn = document.getElementById('getWeight2Btn');
+            const monitoringBtn = document.getElementById('monitoringBtn');
             
             if (connected) {
                 const statusText = simulationMode ? 'シミュレーション接続' : '接続済み';
@@ -700,12 +547,17 @@
                 disconnectBtn.disabled = simulationMode ? true : false;
                 getWeight1Btn.disabled = false;
                 getWeight2Btn.disabled = false;
+                monitoringBtn.disabled = false;
             } else {
                 statusElement.innerHTML = '状態: <span class="disconnected">未接続</span>';
                 connectBtn.disabled = simulationMode ? true : false;
                 disconnectBtn.disabled = true;
                 getWeight1Btn.disabled = true;
                 getWeight2Btn.disabled = true;
+                monitoringBtn.disabled = true;
+                
+                // 連続監視を停止
+                stopContinuousMonitoring();
             }
         }
 
@@ -724,10 +576,10 @@
             document.getElementById('errorMessage' + areaNumber).textContent = '';
         }
 
-        // ページロード時の初期化
+        // 切断イベントの処理
         document.addEventListener('DOMContentLoaded', function() {
+            // ページロード時の初期化
             updateConnectionStatus(false);
-            addDebugLog('システム初期化完了');
         });
     </script>
 </body>
