@@ -325,9 +325,19 @@
     function updateInfoMessage(e){document.getElementById("infoMessage").textContent=e}
     function showErrorMessage(e,t){document.getElementById("errorMessage"+e).textContent=t}
     function clearErrorMessage(e){document.getElementById("errorMessage"+e).textContent=""}
+
+    window.addEventListener('beforeunload', (event) => {
+    // ページが閉じられる前に、確実に接続を切断する
+    if (bluetoothDevice && bluetoothDevice.gatt.connected) {
+        console.log('ページが閉じられるため、Bluetooth接続を切断します。');
+        // 同期的に切断を試みる（ただし、完了を待つことはできない）
+        bluetoothDevice.gatt.disconnect();
+    }
+});
 </script>
 </body>
 </html>
+
 
 
 
