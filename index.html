@@ -147,7 +147,6 @@
     let monitoringInterval = null;
     let receivedDataBuffer = null;
     let dataAccumulator = '';  // 分割データを蓄積するバッファ
-    let isWaitingForResponse = false; // データ受信待機中フラグ
 
     // SDKの仕様に基づく設定値
     const SERVICE_UUID = '5699d362-0c53-11e7-93ae-92361f002671';
@@ -171,26 +170,18 @@
         try {
             updateInfoMessage('接続中...');
             
-            // デバイスの検索・選択
             bluetoothDevice = await navigator.bluetooth.requestDevice({
                 filters: [{ namePrefix: DEVICE_NAME_PREFIX }],
                 optionalServices: [SERVICE_UUID]
             });
 
-            // GATTサーバーに接続
             bluetoothServer = await bluetoothDevice.gatt.connect();
-            
-            // サービスの取得
             service = await bluetoothServer.getPrimaryService(SERVICE_UUID);
-            
-            // キャラクタリスティックの取得
             readCharacteristic = await service.getCharacteristic(READ_CHARACTERISTIC_UUID);
             writeCharacteristic = await service.getCharacteristic(WRITE_CHARACTERISTIC_UUID);
             
-            // 通知の設定（データ受信の待機）
             await setupNotification();
             
-            // 接続状態の更新
             updateConnectionStatus(true);
             updateInfoMessage('接続成功: ' + bluetoothDevice.name);
             
@@ -207,8 +198,6 @@
             if (readCharacteristic && readCharacteristic.properties.notify) {
                 console.log('通知機能を有効化中...');
                 await readCharacteristic.startNotifications();
-                
-                // データ受信時のイベントハンドラを設定
                 readCharacteristic.addEventListener('characteristicvaluechanged', handleNotification);
                 console.log('通知機能が有効化されました');
             } else {
@@ -219,58 +208,39 @@
         }
     }
 
-    /**
-     * 【修正点1】データ受信処理の改善
-     *  - 受信したデータをバッファ(dataAccumulator)に蓄積します。
-     *  - バッファ内に終端記号(\r\n)が含まれる限りループ処理し、
-     *    溜まっている全てのメッセージを処理できるようにしました。
-     */
+    // データ受信時の処理（データ結合ロジック）
     function handleNotification(event) {
         const value = event.target.value;
         const timestamp = new Date().toISOString();
-        const rawData = new Uint8Array(value.buffer);
-        const partialString = new TextDecoder().decode(rawData);
+        const partialString = new TextDecoder().decode(value.buffer);
         
-        console.log(`[${timestamp}] 部分データ受信 (${rawData.length}bytes):`, partialString.replace(/\r\n/g, '\\r\\n'));
-        
-        // 受信したデータをバッファに蓄積
+        console.log(`[${timestamp}] 部分データ受信:`, partialString.replace(/\r\n/g, '\\r\\n'));
         dataAccumulator += partialString;
         
-        // 終端記号(\r\n)で終わるメッセージを全て処理する
         while (dataAccumulator.includes('\r\n')) {
             const endIndex = dataAccumulator.indexOf('\r\n');
             const completeMessage = dataAccumulator.substring(0, endIndex);
-            
-            // バッファから処理済みのメッセージを削除
-            dataAccumulator = dataAccumulator.substring(endIndex + 2); // `\r\n`の2文字分進める
+            dataAccumulator = dataAccumulator.substring(endIndex + 2);
 
             console.log(`[${timestamp}] 完全なメッセージを抽出:`, completeMessage);
             
-            // 完全なデータをバッファに保存
             receivedDataBuffer = {
                 timestamp: timestamp,
-                completeMessage: completeMessage,
-                rawMessage: completeMessage + '\r\n',
-                dataView: new DataView(new TextEncoder().encode(completeMessage).buffer) // \r\nは含めずに渡す
+                dataView: new DataView(new TextEncoder().encode(completeMessage).buffer)
             };
             
-            // データ解析を試行
             try {
                 const weight = parseWeightData(receivedDataBuffer.dataView);
                 console.log(`[${timestamp}] 解析成功: ${weight}g`);
-
-                // UI更新（どのボタンが押されたかにかかわらず、最新の値を表示）
-                // 必要であれば、どちらのエリアを更新するか判定するロジックを追加
+                
+                // 暫定的に測定値1のエリアに結果を表示
                 document.getElementById('weightDisplay1').textContent = weight.toFixed(2) + ' g';
                 clearErrorMessage(1);
+
             } catch (error) {
-                console.log(`[${timestamp}] 解析エラー:`, error.message);
+                console.error(`[${timestamp}] 解析エラー:`, error.message);
                 showErrorMessage(1, `解析エラー: ${error.message}`);
             }
-        }
-        
-        if (dataAccumulator.length > 0) {
-            console.log(`[${timestamp}] データ蓄積中... 現在のバッファ: "${dataAccumulator}"`);
         }
     }
 
@@ -293,8 +263,95 @@
             updateInfoMessage('切断エラー: ' + error.message);
         }
     }
-    
-    // (連続監視の関数は変更なし)
+
+    /**
+     * 【修正箇所】重量取得処理の簡略化
+     *  - 動作が確認できた「通常のWrite」によるコマンド送信のみに処理を絞りました。
+     *  - Read-onlyやWriteWithoutResponseの試行ロジックは削除されています。
+     */
+    async function getWeight(areaNumber) {
+        try {
+            clearErrorMessage(areaNumber);
+
+            // シミュレーションモードの処理
+            if (simulationMode) {
+                const weight = areaNumber === 1 ? SIMULATION_WEIGHT_1 : SIMULATION_WEIGHT_2;
+                document.getElementById('weightDisplay' + areaNumber).textContent = weight.toFixed(2) + ' g';
+                return;
+            }
+
+            // 接続状態とキャラクタリスティックの存在を確認
+            if (!bluetoothDevice || !bluetoothDevice.gatt.connected || !writeCharacteristic) {
+                throw new Error('電子秤と接続されていません。再接続してください。');
+            }
+
+            console.log(`[エリア${areaNumber}] 重量取得コマンドを送信します...`);
+
+            // 秤に重量データの送信を要求するコマンド ('Q\r\n') を送信
+            const command = new TextEncoder().encode('Q\r\n');
+            await writeCharacteristic.writeValue(command);
+
+            console.log('コマンド送信成功。秤からの応答（通知）を待機します。');
+            updateInfoMessage('データ受信待機中...');
+
+            // データ受信後の処理（解析と表示）は、
+            // イベントリスナーに登録された handleNotification 関数が自動的に行います。
+
+        } catch (error) {
+            console.error(`[エリア${areaNumber}] 重量取得エラー:`, error);
+            if (error.message.includes('disconnected') || error.message.includes('GATT')) {
+                updateConnectionStatus(false);
+                updateInfoMessage('接続が切断されました。再接続してください。');
+            }
+            showErrorMessage(areaNumber, 'コマンド送信エラー: ' + error.message);
+        }
+    }
+
+    // 重量データの解析（ログ出力付き）
+    function parseWeightData(dataView) {
+        try {
+            const responseStr = new TextDecoder().decode(dataView.buffer).trim();
+
+            console.log('--- データ解析開始 ---');
+            console.log('解析対象の文字列:', `'${responseStr}'`);
+
+            if (responseStr.length < 2) {
+                throw new Error('データが短すぎます');
+            }
+            
+            const header = responseStr.substring(0, 2);
+            console.log('抽出されたヘッダ:', `'${header}'`);
+            
+            if (header === 'ST') {
+                const parts = responseStr.split(',');
+                if (parts.length < 2) throw new Error('データ形式が不正です (セパレータなし)');
+                
+                const weightData = parts[1].trim();
+                const weight = parseFloat(weightData);
+                if (isNaN(weight)) throw new Error('重量の数値変換に失敗');
+
+                console.log('--- データ解析終了 ---');
+                return weight;
+                
+            } else if (header === 'QT') {
+                throw new Error('個数モードのデータです');
+            } else if (header === 'US') {
+                throw new Error('データが安定していません');
+            } else if (header === 'OL') {
+                throw new Error('データが計量範囲を超えています');
+            } else {
+                throw new Error('未知のヘッダです');
+            }
+            
+        } catch (error) {
+            console.error('--- データ解析エラー ---:', error);
+            throw error;
+        }
+    }
+
+    // --- 以下、変更のないヘルパー関数 ---
+
+    // 連続監視の切り替え
     function toggleContinuousMonitoring() {
         if (continuousMonitoring) {
             stopContinuousMonitoring();
@@ -303,6 +360,7 @@
         }
     }
 
+    // 連続監視の開始
     function startContinuousMonitoring() {
         continuousMonitoring = true;
         const monitoringBtn = document.getElementById('monitoringBtn');
@@ -313,14 +371,15 @@
             const timestamp = new Date().toISOString();
             if (receivedDataBuffer) {
                 const timeDiff = Date.now() - new Date(receivedDataBuffer.timestamp).getTime();
-                console.log(`[${timestamp}] 最新完全データ (${timeDiff}ms前):`, receivedDataBuffer.rawMessage.replace(/\r\n/g, '\\r\\n'));
+                console.log(`[${timestamp}] 最新データあり (${timeDiff}ms前)`);
             } else {
                 console.log(`[${timestamp}] データ待機中...`);
             }
         }, 1000);
-        updateInfoMessage('連続監視を開始しました (1秒間隔)');
+        updateInfoMessage('連続監視を開始しました');
     }
 
+    // 連続監視の停止
     function stopContinuousMonitoring() {
         continuousMonitoring = false;
         const monitoringBtn = document.getElementById('monitoringBtn');
@@ -335,98 +394,8 @@
             updateInfoMessage('連続監視を停止しました');
         }
     }
-    
-    /**
-     * 【修正点2】重量取得処理の変更
-     *  - readValue()を直接呼び出すのをやめ、コマンド送信に専念します。
-     *  - 実際のデータ受信と解析は、通知イベントで動作する handleNotification 関数に一任します。
-     *  - これにより、データが分割されても handleNotification が正しく結合して処理してくれます。
-     */
-    async function getWeight(areaNumber) {
-        try {
-            clearErrorMessage(areaNumber);
 
-            if (simulationMode) {
-                const weight = areaNumber === 1 ? SIMULATION_WEIGHT_1 : SIMULATION_WEIGHT_2;
-                document.getElementById('weightDisplay' + areaNumber).textContent = weight.toFixed(2) + ' g';
-                return;
-            }
-
-            if (!bluetoothDevice || !bluetoothDevice.gatt.connected || !writeCharacteristic) {
-                throw new Error('電子秤との接続が切断されています。再接続してください。');
-            }
-
-            console.log(`重量取得コマンド送信 (エリア${areaNumber})...`);
-
-            // "Q\r\n" コマンドを送信して、秤からのデータ送信を要求する
-            const command = new TextEncoder().encode('Q\r\n');
-            await writeCharacteristic.writeValueWithResponse(command); // または writeValue
-            
-            console.log('コマンド送信成功。秤からの応答を待機します...');
-            updateInfoMessage('データ受信待機中...');
-            
-            // 実際のデータ表示はhandleNotificationで行われる
-
-        } catch (error) {
-            console.error('重量取得コマンド送信エラー:', error);
-            if (error.message.includes('disconnected') || error.message.includes('GATT')) {
-                updateConnectionStatus(false);
-                updateInfoMessage('接続が切断されました。再接続してください。');
-            }
-            showErrorMessage(areaNumber, 'コマンド送信エラー: ' + error.message);
-        }
-    }
-
-    /**
-     * 【修正点3】データ解析とログ出力の改善
-     *  - 解析対象のデータと、そこから抽出したヘッダをコンソールに出力するようにしました。
-     *  - trim() を使って、文字列の前後の不要な空白や改行コードを取り除き、解析精度を向上させました。
-     */
-    function parseWeightData(dataView) {
-        try {
-            const uint8Array = new Uint8Array(dataView.buffer);
-            const responseStr = new TextDecoder().decode(uint8Array).trim();
-
-            // === ご要望のログ出力 ===
-            console.log('--- データ解析開始 ---');
-            console.log('解析対象の文字列:', `'${responseStr}'`);
-
-            if (responseStr.length < 2) {
-                throw new Error('データが短すぎます');
-            }
-            
-            const header = responseStr.substring(0, 2);
-            console.log('抽出されたヘッダ:', `'${header}'`);
-            // ========================
-            
-            if (header === 'ST') {
-                const parts = responseStr.split(',');
-                if (parts.length < 2) {
-                    throw new Error('データ形式が不正です (セパレータが見つかりません)');
-                }
-                const weightData = parts[1].trim(); // " +0000.00 g" のような形式
-                const weight = parseFloat(weightData.split(' ')[0]); // 数値部分のみ抽出
-                
-                console.log('--- データ解析終了 ---');
-                return weight;
-                
-            } else if (header === 'QT') {
-                throw new Error('個数モードのデータです（計量モードに切り替えてください）');
-            } else if (header === 'US') {
-                throw new Error('データが安定していません');
-            } else if (header === 'OL') { // "QL"ではなく"OL"(Overload)が一般的
-                throw new Error('データが計量範囲を超えています');
-            } else {
-                throw new Error('未知のヘッダです');
-            }
-            
-        } catch (error) {
-            console.error('--- データ解析エラー ---:', error);
-            throw error;
-        }
-    }
-
-    // (以降のヘルパー関数は変更なし)
+    // シミュレーションモードの切り替え
     function toggleSimulationMode() {
         simulationMode = !simulationMode;
         const simulationBtn = document.getElementById('simulationBtn');
@@ -454,8 +423,6 @@
     }
 
     function clearWeightDisplays() {
-        weight1 = null;
-        weight2 = null;
         document.getElementById('weightDisplay1').textContent = '--.-- g';
         document.getElementById('weightDisplay2').textContent = '--.-- g';
         clearErrorMessage(1);
@@ -507,4 +474,5 @@
 </script>
 </body>
 </html>
+
 
